@@ -1,0 +1,184 @@
+# =========================
+# OS Specific
+# =========================
+
+# macOS
+.DS_Store
+*.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# =========================
+# Environment & Config
+# =========================
+
+# Environment files (contain API keys)
+.env
+.env.*
+!.env.sample
+
+# =========================
+# PDF OCR Project Specific
+# =========================
+
+# Temporary processing directories
+script/temp_*/
+temp_*/
+
+# State files
+state/
+.state/
+*.state
+
+# Processing artifacts
+batch_*.json
+*_response.json
+*_result.json
+*_status.json
+*_payload.json
+json_parts_*.tmp
+page-*.png
+page-*.jpg
+
+# Backup files
+*.backup
+*.backup_*
+*.bak
+script/backups*/
+script/debug_backups/
+
+# Log files
+*.log
+script/logs/
+
+# Test results
+test-results/
+coverage/
+
+# =========================
+# Obsidian
+# =========================
+
+# Note: 以下はprivateリポジトリなので共有可能
+
+# Obsidian workspace and cache (個人の作業状態)
+# .obsidian/workspace*
+# .obsidian/cache
+# .trash/
+# .obsidian/app.json (基本設定)
+# .obsidian/appearance.json (外観設定)
+# .obsidian/hotkeys.json (ホットキー設定)
+# .obsidian/core-plugins.json (コアプラグイン設定)
+# .obsidian/community-plugins.json (コミュニティプラグイン一覧)
+# .obsidian/plugins/*/data.json
+
+# =========================
+# IDE & Editors
+# =========================
+
+# VS Code (keep workspace settings for this project)
+# .vscode/
+*.code-workspace
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim
+*.swp
+*.swo
+*~
+.vim/
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Sublime Text
+*.sublime-*
+
+# =========================
+# Languages & Frameworks
+# =========================
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv
+pip-log.txt
+.pytest_cache/
+.mypy_cache/
+
+# =========================
+# Security
+# =========================
+
+# Private keys and certificates
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+
+# API keys and secrets
+secrets.json
+credentials.json
+
+# =========================
+# Other
+# =========================
+
+# Claude/AI tools
+# .claude/
+.cursor/
+.serena/
+
+# Archive files (usually not needed in repo)
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Database files
+# *.sqlite
+*.sqlite3
+*.db
+
+# Temporary files
+*.tmp
+*.temp
+*.pid
+*.seed
+*.pid.lock
