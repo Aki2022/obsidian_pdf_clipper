@@ -397,21 +397,4 @@ Immediately searchable & referenceable high-quality Markdown in Obsidian
 
 ---
 
-**🎯 With Raycast integration, PDF processing becomes part of your daily routine. Start efficient knowledge management today!**
-
-## 📄 License
-
-MIT License
-
-## 🤝 Contributing
-
-Issues and Pull Requests are welcome. We especially appreciate contributions in the following areas:
-
-- Support for new AI providers
-- OCR accuracy improvements
-- UI enhancements
-- Documentation improvements
-
----
-
 **🌏 [日本語ドキュメント](README_ja.md) | [English Documentation](README.md)**
