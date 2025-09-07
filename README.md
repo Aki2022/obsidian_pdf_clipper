@@ -1,6 +1,6 @@
 # Obsidian PDF OCR & Clipper
 
-An AI-powered PDF OCR processing system that converts web PDFs and local PDF files to high-quality Markdown and integrates them into your Obsidian vault.
+An AI-powered PDF OCR processing system that converts web PDFs, local PDF files, and directories to high-quality Markdown and integrates them into your Obsidian vault.
 
 **🌏 [日本語ドキュメント](README_ja.md) | [English Documentation](README.md)**
 
@@ -14,19 +14,19 @@ An AI-powered PDF OCR processing system that converts web PDFs and local PDF fil
 
 - 📄 **PDF OCR Processing**: High-precision Markdown conversion of web/local PDFs
 - 🌐 **Automatic Multilingual Translation**: Automated Japanese translation of English documents
-- 💰 **FREE/PAID API Auto-switching**: Leverages Gemini API's free tier (as of Aug 19, 2025) with automatic fallback to paid API for large files (>19MB)
+- 💰 **FREE/PAID API Auto-switching**: Leverages Gemini API's free tier (as of Sep 8, 2025) with automatic fallback to paid API for large files (>9MB)
 - 📱 **Slack Integration**: Real-time processing status notifications
 - 📊 **Cost Tracking**: Automatic calculation and Slack notification of token usage and costs
-- 🎨 **CSL Compliance**: YAML frontmatter compatible with academic literature management
 - 💡 **Raycast Integration**: Simply copy a URL and type `clipPDF` in Raycast to convert PDFs to Markdown and save to Obsidian
+- **scansnap Integration**: By setting a directory where scanned PDFs are saved, you can also convert paper documents to Markdown
 
 ### 🔄 Workflow
 
 ```mermaid
 graph TD
     A[PDF/URL] --> B[Size Detection]
-    B -->|≤19MB| C[Free API]
-    B -->|>19MB| D[Paid API]
+    B -->|≤9MB| C[Free API]
+    B -->|>9MB| D[Paid API]
     C --> E[OCR Processing]
     D --> E
     E --> F[Multilingual Translation]
@@ -42,20 +42,19 @@ graph TD
 ```
 obsidian-vault/
 ├── .env                      # Environment settings (git-ignored)
-├── .env.sample              # Configuration template
-├── README.md                # This file
-├── README_ja.md             # Japanese documentation
-├── script/                  # Execution scripts
-│   ├── clipPDF.sh          # Web PDF processing (Raycast frontend)
-│   ├── background_ocrPDF.sh # Main OCR processing engine
-│   ├── background_slack.sh  # Slack notification module
-│   ├── tag.md              # Tag dictionary (optional)
-│   └── temp_*/             # Temporary processing directories
-├── vault/                   # Obsidian content (configurable)
-│   ├── clip/               # Web PDF output
-│   ├── scan/               # Local PDF output
-│   └── paper/              # Academic literature output
-└── attachments/             # Original PDF file storage
+├── .env.sample               # Configuration template
+├── README.md                 # This file
+├── script/                   # Execution scripts
+│   ├── ocrPDF.sh             # PDF OCR frontend (URL/local/directory)
+│   ├── background_ocrPDF.sh  # Main OCR processing engine
+│   ├── background_slack.sh   # Slack notification module
+│   ├── tag.md                # Tag dictionary (optional)
+│   # temp_* directories currently unused
+├── vault/                    # Obsidian content (configurable)
+│   ├── clip/                 # Web PDF output
+│   ├── scan/                 # Local PDF output
+│   └── paper/                # Academic literature output
+└── attachments/              # Original PDF file storage
 ```
 
 ## 🛠️ Setup
@@ -63,7 +62,7 @@ obsidian-vault/
 ### 1. System Requirements
 
 ```bash
-# macOS essential tools
+# macOS essential tools: PNG optimization
 brew install poppler jq optipng
 
 # System commands (usually pre-installed)
@@ -85,7 +84,7 @@ vim .env
 | Setting           | Description                    | Source                                                       |
 | ----------------- | ------------------------------ | ------------------------------------------------------------ |
 | `AI_API_KEY`      | Gemini API (basic)             | [Google AI Studio](https://makersuite.google.com/app/apikey) |
-| `AI_API_KEY_PAID` | Gemini Paid API (for >19MB)    | [Google Cloud Console](https://console.cloud.google.com/)    |
+| `AI_API_KEY_PAID` | Gemini Paid API (for >9MB)     | [Google Cloud Console](https://console.cloud.google.com/)    |
 | `SLACK_BOT_TOKEN` | Slack notifications (optional) | [Slack API](https://api.slack.com/apps)                      |
 
 ### 3. Pricing Configuration (Important)
@@ -101,18 +100,19 @@ GEMINI_THOUGHTS_COST_PER_1K=0.0025   # $0.0025/1000 tokens
 
 ### 📄 PDF OCR Processing
 
-#### 🌐 Web PDFs
+#### 🌐 Web PDFs, Local PDFs, Directories
 
 ```bash
-./script/clipPDF.sh "https://example.com/paper.pdf"
-./script/clipPDF.sh "https://example.com/paper.pdf" paper
-```
+# Specify a PDF file or URL
+./script/ocrPDF.sh "https://example.com/paper.pdf"
+./script/ocrPDF.sh "/path/to/document.pdf"
 
-#### 📱 Local PDFs
+# Specify processing category (clip/scan/paper)
+./script/ocrPDF.sh "https://example.com/paper.pdf" paper
+./script/ocrPDF.sh "/path/to/document.pdf" scan
 
-```bash
-./script/clipPDF.sh "/path/to/document.pdf"
-./script/clipPDF.sh "/path/to/document.pdf" scan
+# Batch process all PDFs in a directory
+./script/ocrPDF.sh "/path/to/pdf_directory/" scan
 ```
 
 #### 🎯 Processing Categories
@@ -125,9 +125,9 @@ GEMINI_THOUGHTS_COST_PER_1K=0.0025   # $0.0025/1000 tokens
 
 The system automatically selects the optimal API:
 
-- **≤19MB**: FREE API usage (cost reduction)
-- **>19MB**: PAID API usage (high-speed processing)
-- **Auto fallback**: Only processes ≤19MB files when PAID API key is not configured
+- **≤9MB**: FREE API usage (cost reduction)
+- **>9MB**: PAID API usage (high-speed processing)
+- **Auto fallback**: Only processes ≤9MB files when PAID API key is not configured
 
 ### 🌐 Multilingual Translation
 
@@ -140,7 +140,7 @@ Automatically adds Japanese translation for English documents:
 
 Original English content...
 
-## 日本語訳
+## Japanese Translation
 
 Automatically translated Japanese content...
 ```
@@ -150,17 +150,17 @@ Automatically translated Japanese content...
 #### Automatic Tag Assignment
 
 1. **Required tags**: Processing category (clip/scan/paper), pdf
-2. **Standard tags**: 3-5 tags selected from script/tag.md
-3. **Dynamic tags**: 2-4 newly created tags specific to document content
+2. **Standard tags**: 3-5 tags selected from script/tag.md (AI auto-selects based on content)
+3. **Dynamic tags**: 2-4 newly created tags specific to document content (AI extraction)
 
-#### Dynamic Tag Examples
+#### Dynamic Tag Example
 
 ```yaml
 tags:
   - paper
   - pdf
-  - artificial_intelligence # Standard tag
-  - machine_learning # Standard tag
+  - artificial_intelligence # Standard tag (from tag.md)
+  - machine_learning # Standard tag (from tag.md)
   - transformer_architecture # Dynamic tag
   - attention_mechanism # Dynamic tag
 ```
@@ -171,14 +171,14 @@ tags:
 
 1. **Start Notification**
 
-```text
+```
 @user 🚀 PDF OCR Processing - Started
 • URL: https://example.com/paper.pdf
 ```
 
 2. **Completion Notification**
 
-```text
+```
 @user ✅ PDF OCR Processing - Success
 • PDF: research_paper.pdf
 • md: paper/20250819_research_paper.md
@@ -189,7 +189,7 @@ tags:
 
 3. **Failure Notification**
 
-```text
+```
 @user ❌ PDF OCR Processing - Failed
 • PDF: large_document.pdf
 • message: Large payload requires Paid API key
@@ -233,7 +233,7 @@ cost: $2.45(i$1.20+t$0.00+o$1.25: total 163,245 tkn)
 
 #### Cost Optimization Features
 
-1. **Size-based API switching**: Automatic switching at 19MB threshold
+1. **Size-based API switching**: Automatic switching at 9MB threshold
 2. **PNG optimization**: File size reduction via optipng
 3. **Dynamic DPI adjustment**: Quality optimization based on page count
 4. **Real-time calculation**: Accurate cost display upon completion
@@ -305,7 +305,7 @@ curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
 
 ```bash
 # For large file processing
-# PAID API key required (>19MB)
+# PAID API key required (>9MB)
 AI_API_KEY_PAID=your-paid-api-key
 
 # Check API usage
@@ -336,7 +336,7 @@ rm -rf script/state/
 
 ```bash
 # Process research papers from URLs
-./script/clipPDF.sh "https://arxiv.org/pdf/2024.12345v1.pdf" paper
+./script/ocrPDF.sh "https://arxiv.org/pdf/2024.12345v1.pdf" paper
 
 # Process local research papers
 ./script/background_ocrPDF.sh "/path/to/research_papers/" paper
@@ -349,10 +349,10 @@ rm -rf script/state/
 
 ```bash
 # Process scanned documents
-./script/clipPDF.sh "/path/to/scanned/contracts.pdf" scan
+./script/ocrPDF.sh "/path/to/scanned/contracts.pdf" scan
 
 # Process web PDFs
-./script/clipPDF.sh "https://company.com/annual_report.pdf" clip
+./script/ocrPDF.sh "https://company.com/annual_report.pdf" clip
 
 # Result: Auto-classification + Slack notifications + cost tracking
 ```

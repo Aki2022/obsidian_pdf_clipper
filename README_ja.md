@@ -10,19 +10,19 @@
 
 - 📄 **PDF OCR 処理**: Web/ローカル PDF を高精度で Markdown 化
 - 🌐 **多言語自動翻訳**: 英語文書の日本語翻訳を自動化
-- 💰 **FREE/PAID API 自動切替**: 現時点（2025/8/19）で一定程度まで無料で利用できる gemini の API を活用。しかしファイルサイズが大きくなると処理できない制約があるので、一定サイズ以上の場合は有料 API にて対応
+- 💰 **FREE/PAID API 自動切替**: 現時点（2025/9/8）で一定程度まで無料で利用できる gemini の API を活用。しかしファイルサイズが大きくなると処理できない制約があるので、一定サイズ以上の場合は有料 API にて対応
 - 📱 **Slack 統合**: 処理状況をリアルタイム通知
 - 📊 **コスト追跡**: トークン使用量とコストを簡易計算し slack に通知
-- 🎨 **CSL 準拠**: 学術文献管理に対応した YAML フロントマター
-- 💡 **Raycast 統合**: URL をコピーして Raycast で `clipPDF` と入力するだけで、PDF を Markdown 化して Obsidian に保存
+- 💡 **Raycast との連携**: URL をコピーして Raycast で `clipPDF` と入力するだけで、PDF を Markdown 化して Obsidian に保存
+- **scansnap との連携**: スキャンした PDF が保存されているディレクトリを設定することで紙資料も markdown 化
 
 ### 🔄 ワークフロー
 
 ```mermaid
 graph TD
     A[PDF/URL] --> B[サイズ判定]
-    B -->|≤19MB| C[Free API]
-    B -->|>19MB| D[Paid API]
+    B -->|≤9MB| C[Free API]
+    B -->|>9MB| D[Paid API]
     C --> E[OCR処理]
     D --> E
     E --> F[多言語翻訳]
@@ -41,7 +41,7 @@ obsidian-vault/
 ├── .env.sample              # 設定テンプレート
 ├── README.md                # このファイル
 ├── script/                  # 実行スクリプト集
-│   ├── clipPDF.sh          # Web PDF処理（Raycastフロントエンド）
+│   ├── ocrPDF.sh           # PDF OCR処理フロントエンド（URL/ローカル/ディレクトリ対応）
 │   ├── background_ocrPDF.sh # メインOCR処理エンジン
 │   ├── background_slack.sh  # Slack通知モジュール
 │   ├── tag.md              # タグ辞書（オプション）
@@ -58,7 +58,7 @@ obsidian-vault/
 ### 1. システム要件
 
 ```bash
-# macOS必須ツール
+# macOS必須ツール: png最適化
 brew install poppler jq optipng
 
 # システムコマンド（通常pre-installed）
@@ -77,11 +77,11 @@ vim .env
 
 #### 必須設定項目
 
-| 設定項目          | 説明                           | 取得先                                                       |
-| ----------------- | ------------------------------ | ------------------------------------------------------------ |
-| `AI_API_KEY`      | Gemini API（基本）             | [Google AI Studio](https://makersuite.google.com/app/apikey) |
-| `AI_API_KEY_PAID` | Gemini Paid API（19MB 超え用） | [Google Cloud Console](https://console.cloud.google.com/)    |
-| `SLACK_BOT_TOKEN` | Slack 通知用（オプション）     | [Slack API](https://api.slack.com/apps)                      |
+| 設定項目          | 説明                          | 取得先                                                       |
+| ----------------- | ----------------------------- | ------------------------------------------------------------ |
+| `AI_API_KEY`      | Gemini API（基本）            | [Google AI Studio](https://makersuite.google.com/app/apikey) |
+| `AI_API_KEY_PAID` | Gemini Paid API（9MB 超え用） | [Google Cloud Console](https://console.cloud.google.com/)    |
+| `SLACK_BOT_TOKEN` | Slack 通知用（オプション）    | [Slack API](https://api.slack.com/apps)                      |
 
 ### 3. 価格設定（重要）
 
@@ -96,18 +96,19 @@ GEMINI_THOUGHTS_COST_PER_1K=0.0025   # $0.0025/1000トークン
 
 ### 📄 PDF OCR 処理
 
-#### 🌐 Web PDF
+#### 🌐 Web PDF・ローカル PDF・ディレクトリ
 
 ```bash
-./script/clipPDF.sh "https://example.com/paper.pdf"
-./script/clipPDF.sh "https://example.com/paper.pdf" paper
-```
+# PDFファイルまたはURLを指定
+./script/ocrPDF.sh "https://example.com/paper.pdf"
+./script/ocrPDF.sh "/path/to/document.pdf"
 
-#### 📱 ローカル PDF
+# 処理カテゴリを指定（clip/scan/paper）
+./script/ocrPDF.sh "https://example.com/paper.pdf" paper
+./script/ocrPDF.sh "/path/to/document.pdf" scan
 
-```bash
-./script/clipPDF.sh  "/path/to/document.pdf"
-./script/clipPDF.sh  "/path/to/document.pdf" scan
+# ディレクトリ内のPDFを一括処理
+./script/ocrPDF.sh "/path/to/pdf_directory/" scan
 ```
 
 #### 🎯 処理カテゴリ
@@ -120,9 +121,9 @@ GEMINI_THOUGHTS_COST_PER_1K=0.0025   # $0.0025/1000トークン
 
 システムが自動で最適な API を選択：
 
-- **≤19MB**: FREE API 使用（コスト削減）
-- **>19MB**: PAID API 使用（高速処理）
-- **自動フォールバック**: PAID API キー未設定時は 19MB 以下のみ処理
+- **≤9MB**: FREE API 使用（コスト削減）
+- **>9MB**: PAID API 使用（高速処理）
+- **自動フォールバック**: PAID API キー未設定時は 9MB 以下のみ処理
 
 ### 🌐 多言語翻訳
 
@@ -145,7 +146,7 @@ Original English content...
 #### 自動タグ付与
 
 1. **必須タグ**: 処理カテゴリ（clip/scan/paper）、pdf
-2. **標準タグ**: script/tag.md から 3-5 個選択
+2. **標準タグ**: script/tag.md から 3-5 個選択（内容に応じて AI が自動選択）
 3. **動的タグ**: 文書内容に特化した 2-4 個新規作成
 
 #### 動的タグ例
@@ -228,7 +229,7 @@ cost: $2.45(i$1.20+t$0.00+o$1.25: total 163,245 tkn)
 
 #### コスト最適化機能
 
-1. **サイズ別 API 切替**: 19MB 閾値で自動切替
+1. **サイズ別 API 切替**: 9MB 閾値で自動切替
 2. **PNG 最適化**: optipng によるファイルサイズ削減
 3. **DPI 動的調整**: ページ数に応じた品質最適化
 4. **リアルタイム計算**: 処理完了時に正確なコスト表示
@@ -300,7 +301,7 @@ curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
 
 ```bash
 # 大容量ファイル処理時
-# PAID APIキーが必要（19MB超過時）
+# PAID APIキーが必要（9MB超過時）
 AI_API_KEY_PAID=your-paid-api-key
 
 # API使用量確認
@@ -331,7 +332,7 @@ rm -rf script/state/
 
 ```bash
 # 論文URL処理
-./script/clipPDF.sh "https://arxiv.org/pdf/2024.12345v1.pdf" paper
+./script/ocrPDF.sh "https://arxiv.org/pdf/2024.12345v1.pdf" paper
 
 # ローカル論文処理
 ./script/background_ocrPDF.sh "/path/to/research_papers/" paper
@@ -344,10 +345,10 @@ rm -rf script/state/
 
 ```bash
 # スキャン文書処理
-./script/clipPDF.sh "/path/to/scanned/contracts.pdf" scan
+./script/ocrPDF.sh "/path/to/scanned/contracts.pdf" scan
 
 # WebPDF処理
-./script/clipPDF.sh "https://company.com/annual_report.pdf" clip
+./script/ocrPDF.sh "https://company.com/annual_report.pdf" clip
 
 # 結果: 自動分類 + Slack通知 + コスト追跡
 ```
