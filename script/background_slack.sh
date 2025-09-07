@@ -142,6 +142,9 @@ create_slack_simple_payload() {
         "BATCH")
             api_info="💰 Paid API / BATCH mode"
             ;;
+        "AUTO")
+            api_info="🔄 Auto-detecting API mode"
+            ;;
         *)
             api_info="❓ Unknown mode"
             ;;
@@ -233,12 +236,21 @@ send_slack_notification() {
     local payload=$(create_slack_simple_payload "$status" "$pdf_url" "$title" "$markdown_file" "$error_msg" "$SLACK_REPORT_CHANNEL" "${SLACK_MENTION_USER_ID:-}" "$thread_ts" "$processing_duration" "$token_info")
     
     
-    # Real Slack API implementation
-    curl -s -X POST \
+    # Real Slack API implementation - Debug enabled
+    local response=$(curl -s -X POST \
         -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
         -H "Content-Type: application/json" \
         -d "$payload" \
-        "https://slack.com/api/chat.postMessage" >/dev/null 2>&1
+        "https://slack.com/api/chat.postMessage")
+    
+    # Log API response for debugging
+    if command -v log_with_timestamp >/dev/null 2>&1; then
+        if echo "$response" | grep -q '"ok":true'; then
+            log_with_timestamp "✅ Slack API success"
+        else
+            log_with_timestamp "❌ Slack API error: $(echo "$response" | head -100)"
+        fi
+    fi
     
     # Log completion if log_with_timestamp function exists
     if command -v log_with_timestamp >/dev/null 2>&1; then
