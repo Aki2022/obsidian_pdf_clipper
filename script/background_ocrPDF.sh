@@ -22,10 +22,17 @@ export LC_ALL=en_US.UTF-8
 export LC_CTYPE=en_US.UTF-8
 
 # Global variables for argument parsing
-
 PDF_URL=""
 PRIMARY_TAG="clip"  # Default to 'clip' for backward compatibility
 IS_URL=true  # Flag to distinguish URL from local file
+
+# Log buffer for delayed writing (only save logs on failure)
+LOG_BUFFER=""
+
+# PNG processing global variables
+CONVERTED_PNG_DIR=""
+
+# Constants (will be set after environment loading)
 
 
 # Function to show usage information
@@ -44,9 +51,9 @@ USAGE:
 
 ARGUMENTS:
     INPUT               URL, file path, or directory (automatically detected)
-                       - URL: http://... or https://... → Single processing
-                       - File: /path/to/file.pdf → Single processing  
-                       - Directory: /path/to/dir/ → Batch processing
+                   - URL: http://... or https://... → Single processing
+                   - File: /path/to/file.pdf → Single processing  
+                   - Directory: /path/to/dir/ → Batch processing
     CATEGORY           Optional: clip, scan, paper (default: clip)
 
 EXAMPLES:
@@ -70,15 +77,15 @@ EOF
 parse_arguments() {
     # Check for help option first
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        show_usage
-        exit 0
+    show_usage
+    exit 0
     fi
     
     # Simplified argument validation (1 or 2 arguments)
     if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-        echo "Error: Expected 1 or 2 arguments: <INPUT> [CATEGORY]" >&2
-        echo "Usage: $0 <URL|FILE|DIR> [clip|scan|paper]" >&2
-        return 1
+    echo "Error: Expected 1 or 2 arguments: <INPUT> [CATEGORY]" >&2
+    echo "Usage: $0 <URL|FILE|DIR> [clip|scan|paper]" >&2
+    return 1
     fi
     
     INPUT="$1"
@@ -86,25 +93,25 @@ parse_arguments() {
     
     # 🔥 自動判定ロジック: INPUT内容で処理モード決定
     if [ -d "$INPUT" ]; then
-        # ディレクトリ → バッチ処理
-        BATCH_MODE=true
-        SCAN_DIR="$INPUT"
-        log_with_timestamp "🗂️ Directory detected - Batch mode: $INPUT (category: $PRIMARY_TAG)"
+    # ディレクトリ → バッチ処理
+    BATCH_MODE=true
+    SCAN_DIR="$INPUT"
+    log_with_timestamp "🗂️ Directory detected - Batch mode: $INPUT (category: $PRIMARY_TAG)"
     elif echo "$INPUT" | grep -q '^https\?://'; then
-        # URL → シングル処理
-        BATCH_MODE=false
-        PDF_URL="$INPUT"
-        IS_URL=true
-        log_with_timestamp "🌐 URL detected - Single mode: $INPUT"
+    # URL → シングル処理
+    BATCH_MODE=false
+    PDF_URL="$INPUT"
+    IS_URL=true
+    log_with_timestamp "🌐 URL detected - Single mode: $INPUT"
     elif [ -f "$INPUT" ]; then
-        # ファイル → シングル処理  
-        BATCH_MODE=false
-        PDF_URL="$INPUT"
-        IS_URL=false
-        log_with_timestamp "📄 File detected - Single mode: $INPUT"
+    # ファイル → シングル処理  
+    BATCH_MODE=false
+    PDF_URL="$INPUT"
+    IS_URL=false
+    log_with_timestamp "📄 File detected - Single mode: $INPUT"
     else
-        echo "Error: Invalid input - not a valid URL, existing file, or directory: $INPUT" >&2
-        return 1
+    echo "Error: Invalid input - not a valid URL, existing file, or directory: $INPUT" >&2
+    return 1
     fi
     
     # 自動判定完了 - 引数解析終了
@@ -119,14 +126,14 @@ readonly TEMPERATURE="0.1"
 readonly GEMINI_BASE_URL="https://generativelanguage.googleapis.com/v1beta"
 
 # Realtime-specific constants
-readonly REALTIME_API_TIMEOUT="120"
+readonly REALTIME_API_TIMEOUT="1800"
 readonly REALTIME_API_MAX_TIME="1800"
 
 # Batch-specific constants  
-readonly BATCH_API_TIMEOUT="300"
-readonly BATCH_API_MAX_TIME="7200"
+readonly BATCH_API_TIMEOUT="28800"     # 8時間
+readonly BATCH_API_MAX_TIME="28800"    # 8時間
 readonly BATCH_POLL_INTERVAL="600"
-readonly BATCH_MAX_WAIT="86400"
+readonly BATCH_MAX_WAIT="28800"        # 8時間
 
 # Common processing constants
 readonly DEFAULT_CONNECT_TIMEOUT="30"
@@ -139,7 +146,7 @@ readonly ERROR_MESSAGE_LINES="5"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 VAULT_DIR="$(dirname "$SCRIPT_DIR")"
 ATTACHMENTS_DIR="attachments"
-TIMESTAMP=$(date +%Y%m%d%H%M%S)
+TIMESTAMP=$(date +%Y%m%d%H%M%S%6N)_$$_$RANDOM
 
 # These will be set after argument parsing and environment loading
 BATCH_ID="batch_${TIMESTAMP}_$$"
@@ -154,15 +161,15 @@ calculate_processing_duration() {
     local processing_duration="Unknown"
     
     if [ -n "$start_time" ]; then
-        local end_time=$(date +%s)
-        local start_time_epoch=$(date -j -f "%Y-%m-%d %H:%M:%S JST" "$start_time" +%s 2>/dev/null || echo "0")
-        if [ "$start_time_epoch" != "0" ]; then
-            local duration_seconds=$((end_time - start_time_epoch))
-            local hours=$((duration_seconds / 3600))
-            local minutes=$(((duration_seconds % 3600) / 60))
-            local seconds=$((duration_seconds % 60))
-            processing_duration="${hours}時間${minutes}分${seconds}秒"
-        fi
+    local end_time=$(date +%s)
+    local start_time_epoch=$(date -j -f "%Y-%m-%d %H:%M:%S JST" "$start_time" +%s 2>/dev/null || echo "0")
+    if [ "$start_time_epoch" != "0" ]; then
+        local duration_seconds=$((end_time - start_time_epoch))
+        local hours=$((duration_seconds / 3600))
+        local minutes=$(((duration_seconds % 3600) / 60))
+        local seconds=$((duration_seconds % 60))
+        processing_duration="${hours}時間${minutes}分${seconds}秒"
+    fi
     fi
     
     echo "$processing_duration"
@@ -174,11 +181,6 @@ escape_json() {
     echo "$input" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | awk '{printf "%s\\n", $0}' | sed '$ s/\\n$//'
 }
 
-# Extract title from YAML frontmatter
-extract_title_from_yaml() {
-    local content="$1"
-    echo "$content" | grep "^title:" | head -1 | sed 's/^title: //' | sed 's/\[//g' | sed 's/\]//g' | tr -d '"'
-}
 
 
 # Post-process Gemini output to ensure CSL-compatible YAML frontmatter exists
@@ -190,29 +192,49 @@ check_yaml_exists() {
     head -1 "$output_file" | grep -q "^---$"
 }
 
-# Extract meaningful title from content
+# Helper function to validate if title is meaningful
+is_meaningful_title() {
+    local title="$1"
+    [ -n "$title" ] && \
+    ! [[ "$title" =~ (ページ|Page|章|Chapter) ]] && \
+    [ ${#title} -ge 5 ]
+}
+
+# Extract meaningful title from content with improved validation
 extract_title_from_content() {
     local content="$1"
     local auto_title=""
     
-    # Try to extract a meaningful title from first few lines
-    auto_title=$(echo "$content" | head -"$TITLE_EXTRACT_LINES" | sed -n 's/^# *\(.*\)/\1/p' | head -1)
-    
-    if [ -z "$auto_title" ]; then
-        # Look for English title patterns  
-        auto_title=$(echo "$content" | grep -i "title.*:" | head -1 | sed 's/.*title[^:]*: *//' | sed 's/[*_#]*//g')
+    # Pattern 1: Try to extract from YAML title field (improved validation)
+    local yaml_title=$(echo "$content" | grep -i "^title:" 2>/dev/null | head -1 | sed 's/^title: *//' | sed 's/[*_#]*//g' || true)
+    if is_meaningful_title "$yaml_title"; then
+        auto_title="$yaml_title"
     fi
     
+    # Pattern 2: Try to extract a meaningful title from markdown headers
     if [ -z "$auto_title" ]; then
-        auto_title=$(echo "$content" | head -5 | grep -v "^$" | head -1 | sed 's/^[*#-] *//' | sed 's/^###* *//' | cut -c1-"$MAX_TITLE_LENGTH")
+        local first_lines=$(echo "$content" | head -"${TITLE_EXTRACT_LINES:-10}" 2>/dev/null || true)
+        local markdown_title=$(echo "$first_lines" | sed -n 's/^# *\(.*\)/\1/p' | head -1 2>/dev/null || true)
+        if is_meaningful_title "$markdown_title"; then
+            auto_title="$markdown_title"
+        fi
     fi
     
+    # Pattern 3: Look for meaningful content in first few lines
     if [ -z "$auto_title" ]; then
-        auto_title="Processed Document"
+        local candidate=$(echo "$content" | head -5 2>/dev/null | grep -v "^$" | head -1 | sed 's/^[*#-] *//' | sed 's/^###* *//' | cut -c1-"${MAX_TITLE_LENGTH:-100}" 2>/dev/null || true)
+        if is_meaningful_title "$candidate"; then
+            auto_title="$candidate"
+        fi
     fi
     
-    # Clean up markdown formatting from title
-    auto_title=$(echo "$auto_title" | sed 's/^[#*_ -]*//' | sed 's/[*_#]*$//')
+    # Pattern 4: Fallback to timestamp format for better file management
+    if [ -z "$auto_title" ]; then
+        auto_title="$(date +%Y%m%d_%H%M%S)"
+    fi
+    
+    # Clean up title: remove markdown formatting and replace spaces with underscores
+    auto_title=$(echo "$auto_title" | sed 's/^[#*_ -]*//' | sed 's/[*_#]*$//' | sed 's/[ 　]/_/g')
     echo "$auto_title"
 }
 
@@ -264,28 +286,32 @@ ensure_yaml_frontmatter() {
     
     # Check if file starts with YAML frontmatter using helper function
     if ! check_yaml_exists "$output_file"; then
-        log_with_timestamp "WARNING: Gemini output lacks YAML frontmatter, adding CSL-compatible post-processing"
-        
-        # Read the original content
-        local original_content=$(cat "$output_file")
-        
-        # Extract title using helper function
-        local auto_title=$(extract_title_from_content "$original_content")
-        
-        # Generate YAML frontmatter using helper function
-        local yaml_frontmatter=$(generate_yaml_frontmatter "$auto_title" "$source_value")
-        
-        # Create new content with YAML frontmatter
-        cat > "$output_file" << EOF
+    log_with_timestamp "WARNING: Gemini output lacks YAML frontmatter, adding CSL-compatible post-processing"
+    
+    # Read the original content
+    local original_content=$(cat "$output_file")
+    
+    # Extract title using helper function
+    local auto_title=$(extract_title_from_content "$original_content")
+    
+    # Generate YAML frontmatter using helper function
+    local yaml_frontmatter=$(generate_yaml_frontmatter "$auto_title" "$source_value")
+    
+    # Create new content with YAML frontmatter
+    cat > "$output_file" << EOF
 $yaml_frontmatter
 
 $original_content
 EOF
-        
-        log_with_timestamp "Added YAML frontmatter with auto-extracted title: $auto_title"
+    
+    log_with_timestamp "Added YAML frontmatter with auto-extracted title: $auto_title"
+    echo "$auto_title"
     else
-        log_with_timestamp "YAML frontmatter detected in Gemini output"
-        fix_yaml_array_fields "$output_file"
+    log_with_timestamp "YAML frontmatter detected in Gemini output"
+    fix_yaml_array_fields "$output_file"
+    # Extract title from existing YAML
+    local existing_title=$(extract_title_from_content "$(cat "$output_file")")
+    echo "$existing_title"
     fi
 }
 
@@ -297,36 +323,33 @@ fix_yaml_array_fields() {
     local skip_author_items=false
     
     while IFS= read -r line; do
-        if [ "$line" = "---" ]; then
-            if [ "$in_frontmatter" = false ]; then
-                in_frontmatter=true
-                echo "$line" >> "$temp_file"
+    if [ "$line" = "---" ]; then
+        if [ "$in_frontmatter" = false ]; then
+            in_frontmatter=true
+            echo "$line" >> "$temp_file"
+        else
+            in_frontmatter=false
+            skip_author_items=false
+            echo "$line" >> "$temp_file"
+        fi
+    elif [ "$in_frontmatter" = true ]; then
+        if [ "$skip_author_items" = true ]; then
+            if echo "$line" | grep -q "^  - "; then
+                continue
             else
-                in_frontmatter=false
                 skip_author_items=false
                 echo "$line" >> "$temp_file"
             fi
-        elif [ "$in_frontmatter" = true ]; then
-            if [ "$skip_author_items" = true ]; then
-                if echo "$line" | grep -q "^  - "; then
-                    continue
-                else
-                    skip_author_items=false
-                    echo "$line" >> "$temp_file"
-                fi
-            elif echo "$line" | grep -q "^author:$"; then
-                if IFS= read -r next_line; then
-                    if echo "$next_line" | grep -q "^  - "; then
-                        local author_value=$(echo "$next_line" | sed 's/^  - //')
-                        echo "author: $author_value" >> "$temp_file"
-                        skip_author_items=true
-                        author_fixed=true
-                    else
-                        echo "$line" >> "$temp_file"
-                        echo "$next_line" >> "$temp_file"
-                    fi
+        elif echo "$line" | grep -q "^author:$"; then
+            if IFS= read -r next_line; then
+                if echo "$next_line" | grep -q "^  - "; then
+                    local author_value=$(echo "$next_line" | sed 's/^  - //')
+                    echo "author: $author_value" >> "$temp_file"
+                    skip_author_items=true
+                    author_fixed=true
                 else
                     echo "$line" >> "$temp_file"
+                    echo "$next_line" >> "$temp_file"
                 fi
             else
                 echo "$line" >> "$temp_file"
@@ -334,24 +357,27 @@ fix_yaml_array_fields() {
         else
             echo "$line" >> "$temp_file"
         fi
+    else
+        echo "$line" >> "$temp_file"
+    fi
     done < "$output_file"
     
     if [ "$author_fixed" = true ]; then
-        mv "$temp_file" "$output_file"
+    mv "$temp_file" "$output_file"
     else
-        rm -f "$temp_file"
+    rm -f "$temp_file"
     fi
 }
 
 generate_safe_filename() {
-    local title="$1"
+    local title="${1:-}"
     local safe_title="$title"
     
     # Remove filesystem-unsafe characters
     safe_title="${safe_title//[<>:\"\/\\|?*]/}"
     
-    # Replace spaces (both ASCII and full-width) with underscores
-    safe_title="${safe_title//[ 　]/_}"
+    # Replace all types of spaces with underscores (ASCII space, full-width space, tab, etc.)
+    safe_title="${safe_title//[ 　	]/_}"
     
     # Remove consecutive underscores
     while [[ "$safe_title" =~ "__" ]]; do
@@ -362,6 +388,11 @@ generate_safe_filename() {
     safe_title="${safe_title#_}"
     safe_title="${safe_title%_}"
     
+    # If title becomes empty or too short, use timestamp fallback
+    if [ -z "$safe_title" ] || [ ${#safe_title} -lt 3 ]; then
+        safe_title="$(date +%Y%m%d_%H%M%S)"
+    fi
+    
     echo "$safe_title"
 }
 
@@ -369,18 +400,22 @@ generate_safe_filename() {
 log_with_timestamp() {
     local message="$1"
     local timestamp=$(TZ='Asia/Tokyo' date '+%Y-%m-%d %H:%M:%S JST')
+    local log_entry="[$timestamp] $message"
     
-    # Ensure STATE_DIR exists before logging
-    if [ -n "${STATE_DIR:-}" ]; then
-        mkdir -p "$STATE_DIR"
-    fi
+    # Accumulate log entries in memory buffer
+    LOG_BUFFER="${LOG_BUFFER}${log_entry}\n"
     
-    # Check if LOG_FILE is set and not empty
-    if [ -n "${LOG_FILE:-}" ] && [ -n "$LOG_FILE" ]; then
-        echo "[$timestamp] $message" | tee -a "$LOG_FILE" >&2
-    else
-        # Just output to stderr if LOG_FILE is not ready
-        echo "[$timestamp] $message" >&2
+    # Always output to stderr immediately for real-time monitoring
+    echo "$log_entry" >&2
+}
+
+# Save failed logs to file (only called on failure)
+save_failed_logs() {
+    if [ -n "$LOG_BUFFER" ]; then
+        local failed_log="$SCRIPT_DIR/failed_logs/failed_$(date +%Y%m%d_%H%M%S)_$$.log"
+        mkdir -p "$(dirname "$failed_log")"
+        echo -e "$LOG_BUFFER" > "$failed_log"
+        log_with_timestamp "Failed logs saved to: $failed_log"
     fi
 }
 
@@ -410,14 +445,14 @@ update_state() {
     local additional_info="$2"
     
     if [ -f "$STATE_FILE" ]; then
-        sed -i '' "s/^status=.*/status=$status/" "$STATE_FILE"
-        sed -i '' "s/^timestamp=.*/timestamp=$(TZ='Asia/Tokyo' date '+%Y-%m-%d %H:%M:%S JST')/" "$STATE_FILE"
-        
-        if [ -n "$additional_info" ]; then
-            echo "$additional_info" >> "$STATE_FILE"
-        fi
+    sed -i '' "s/^status=.*/status=$status/" "$STATE_FILE"
+    sed -i '' "s/^timestamp=.*/timestamp=$(TZ='Asia/Tokyo' date '+%Y-%m-%d %H:%M:%S JST')/" "$STATE_FILE"
+    
+    if [ -n "$additional_info" ]; then
+        echo "$additional_info" >> "$STATE_FILE"
+    fi
     else
-        create_state_file "$status" "$additional_info"
+    create_state_file "$status" "$additional_info"
     fi
     
     log_with_timestamp "State updated: $status"
@@ -429,30 +464,36 @@ load_environment() {
     local env_file="$VAULT_DIR/.env"
     
     if [ ! -f "$env_file" ]; then
-        log_with_timestamp "ERROR: Environment file not found: $env_file"
-        return 1
+    log_with_timestamp "ERROR: Environment file not found: $env_file"
+    return 1
     fi
     
     log_with_timestamp "Loading environment from: $env_file"
     
     # Use source instead of complex while loop with heredoc
     if source "$env_file" 2>/dev/null; then
-        log_with_timestamp "Environment loaded successfully using source"
-        
-        # Convert relative paths to absolute after loading
-        if [ -n "${PDF_TEMP_BASE_DIR:-}" ]; then
-            if [[ "$PDF_TEMP_BASE_DIR" == ./* ]] || [[ "$PDF_TEMP_BASE_DIR" == ../* ]]; then
-                PDF_TEMP_BASE_DIR="$(cd "$SCRIPT_DIR" && cd "$PDF_TEMP_BASE_DIR" 2>/dev/null && pwd)" || PDF_TEMP_BASE_DIR="$SCRIPT_DIR/$PDF_TEMP_BASE_DIR"
-            fi
+    log_with_timestamp "Environment loaded successfully using source"
+    
+    # Convert relative paths to absolute after loading
+    if [ -n "${PDF_TEMP_BASE_DIR:-}" ]; then
+        if [[ "$PDF_TEMP_BASE_DIR" == ./* ]] || [[ "$PDF_TEMP_BASE_DIR" == ../* ]]; then
+            PDF_TEMP_BASE_DIR="$(cd "$SCRIPT_DIR" && cd "$PDF_TEMP_BASE_DIR" 2>/dev/null && pwd)" || PDF_TEMP_BASE_DIR="$SCRIPT_DIR/$PDF_TEMP_BASE_DIR"
         fi
-        
-        # Log loaded variables (simplified for debugging)
-        
-        log_with_timestamp "Environment loading completed"
-        return 0
+    fi
+    
+    # Log loaded variables
+    
+    # Set API size threshold from environment (required)
+    if [ -z "${API_SIZE_THRESHOLD:-}" ]; then
+        handle_validation_error "API_SIZE_THRESHOLD" "API_SIZE_THRESHOLD must be set in .env"
+    fi
+    readonly API_SIZE_THRESHOLD="${API_SIZE_THRESHOLD}"
+    
+    log_with_timestamp "Environment loading completed"
+    return 0
     else
-        log_with_timestamp "ERROR: Failed to source environment file"
-        return 1
+    log_with_timestamp "ERROR: Failed to source environment file"
+    return 1
     fi
 }
 
@@ -466,37 +507,40 @@ validate_config() {
     
     # Handle backward compatibility for API keys
     if [ -n "${GEMINI_API_KEY:-}" ] && [ -z "${AI_API_KEY:-}" ]; then
-        AI_API_KEY="$GEMINI_API_KEY"
+    AI_API_KEY="$GEMINI_API_KEY"
     fi
     
-    # Validate AI_API_KEY
-    if [ -z "${AI_API_KEY:-}" ]; then
-        log_with_timestamp "ERROR: AI_API_KEY is not set or empty"
-        handle_validation_error "AI configuration" "AI_API_KEY is not set or empty. Please check your .env file."
+    # Validate API keys (either FREE or PAID must be available)
+    local free_key=$(grep "AI_API_KEY_FREE=" "$VAULT_DIR/.env" 2>/dev/null | sed 's/^AI_API_KEY_FREE=//' | sed 's/ # .*//')
+    local paid_key=$(grep "AI_API_KEY_PAID=" "$VAULT_DIR/.env" 2>/dev/null | sed 's/^AI_API_KEY_PAID=//' | sed 's/ # .*//')
+    
+    if [ -z "$free_key" ] && [ -z "$paid_key" ]; then
+    log_with_timestamp "ERROR: Neither AI_API_KEY_FREE nor AI_API_KEY_PAID is set"
+    handle_validation_error "API configuration" "At least one of AI_API_KEY_FREE or AI_API_KEY_PAID must be set. Please check your .env file."
     fi
     
     
     # Provider-specific API key validation using helper functions  
     case "$AI_PROVIDER" in
-        "gemini")
-            validate_gemini_config "$AI_API_KEY" "$AI_MODEL"
-            ;;
-        "claude")
-            validate_claude_config "$AI_API_KEY" "$AI_MODEL"
-            ;;
-        "openai")
-            validate_openai_config "$AI_API_KEY" "$AI_MODEL"
-            ;;
-        *)
-            log_with_timestamp "ERROR: Unsupported AI provider: $AI_PROVIDER"
-            handle_validation_error "AI provider" "Unsupported AI provider: $AI_PROVIDER. Supported providers: gemini, claude, openai"
-            ;;
+    "gemini")
+        # Use available API key for validation (prefer paid, fallback to free)
+        local validation_key="$paid_key"
+        [ -z "$validation_key" ] && validation_key="$free_key"
+        validate_gemini_config "$validation_key" "$AI_MODEL"
+        ;;
+    "openai")
+        validate_openai_config "$validation_key" "$AI_MODEL"
+        ;;
+    *)
+        log_with_timestamp "ERROR: Unsupported AI provider: $AI_PROVIDER"
+        handle_validation_error "AI provider" "Unsupported AI provider: $AI_PROVIDER. Supported providers: gemini, openai"
+        ;;
     esac
     
     
     # Handle backward compatibility for model names
     if [ -n "${GEMINI_MODEL:-}" ] && [ -z "${AI_MODEL:-}" ]; then
-        AI_MODEL="$GEMINI_MODEL"
+    AI_MODEL="$GEMINI_MODEL"
     fi
     
     # Set and validate AI_MODEL using helper functions
@@ -505,18 +549,14 @@ validate_config() {
     
     # Re-validate with model information
     case "$AI_PROVIDER" in
-        "gemini")
-            validate_gemini_config "$AI_API_KEY" "$AI_MODEL"
-            ;;
-        "claude")
-            validate_claude_config "$AI_API_KEY" "$AI_MODEL"
-            ;;
-        "openai")
-            validate_openai_config "$AI_API_KEY" "$AI_MODEL"
-            ;;
+    "gemini")
+        validate_gemini_config "$validation_key" "$AI_MODEL"
+        ;;
+    "openai")
+        validate_openai_config "$validation_key" "$AI_MODEL"
+        ;;
     esac
     
-    # Legacy variables no longer needed - using AI_* variables directly throughout the code
     
     log_with_timestamp "Configuration validation completed successfully"
 }
@@ -530,46 +570,23 @@ validate_gemini_config() {
     
     # Validate API key format
     if ! echo "$api_key" | grep -q '^AIzaSy' || [ ${#api_key} -lt 39 ]; then
-        log_with_timestamp "ERROR: Gemini API key format appears invalid"
-        handle_validation_error "Gemini API key" "API key format appears invalid. Please check your API key."
+    log_with_timestamp "ERROR: Gemini API key format appears invalid"
+    handle_validation_error "Gemini API key" "API key format appears invalid. Please check your API key."
     fi
     
     # Validate model if provided
     if [ -n "$model" ]; then
-        case "$model" in
-            "gemini-2.5-pro"|"gemini-1.5-pro"|"gemini-1.5-flash")
-                ;;
-            *)
-                log_with_timestamp "ERROR: Invalid Gemini model: $model"
-                handle_validation_error "Gemini model" "Invalid model: $model. Supported models: gemini-2.5-pro, gemini-1.5-pro, gemini-1.5-flash"
-                ;;
-        esac
+    case "$model" in
+        "gemini-2.5-pro"|"gemini-1.5-pro"|"gemini-1.5-flash")
+            ;;
+        *)
+            log_with_timestamp "ERROR: Invalid Gemini model: $model"
+            handle_validation_error "Gemini model" "Invalid model: $model. Supported models: gemini-2.5-pro, gemini-1.5-pro, gemini-1.5-flash"
+            ;;
+    esac
     fi
 }
 
-# Validate Claude configuration
-validate_claude_config() {
-    local api_key="$1"
-    local model="${2:-}"
-    
-    # Validate API key format
-    if ! echo "$api_key" | grep -q '^sk-ant-' || [ ${#api_key} -lt 100 ]; then
-        log_with_timestamp "ERROR: Claude API key format appears invalid"
-        handle_validation_error "Claude API key" "API key format appears invalid. Please check your API key."
-    fi
-    
-    # Validate model if provided
-    if [ -n "$model" ]; then
-        case "$model" in
-            "claude-3-5-sonnet-20241022"|"claude-3-opus-20240229"|"claude-3-haiku-20240307")
-                ;;
-            *)
-                log_with_timestamp "ERROR: Invalid Claude model: $model"
-                handle_validation_error "Claude model" "Invalid model: $model. Supported models: claude-3-5-sonnet-20241022, claude-3-opus-20240229, claude-3-haiku-20240307"
-                ;;
-        esac
-    fi
-}
 
 # Validate OpenAI configuration
 validate_openai_config() {
@@ -578,20 +595,20 @@ validate_openai_config() {
     
     # Validate API key format
     if ! echo "$api_key" | grep -q '^sk-' || [ ${#api_key} -lt 50 ]; then
-        log_with_timestamp "ERROR: OpenAI API key format appears invalid"
-        handle_validation_error "OpenAI API key" "API key format appears invalid. Please check your API key."
+    log_with_timestamp "ERROR: OpenAI API key format appears invalid"
+    handle_validation_error "OpenAI API key" "API key format appears invalid. Please check your API key."
     fi
     
     # Validate model if provided
     if [ -n "$model" ]; then
-        case "$model" in
-            "gpt-4o"|"gpt-4-turbo"|"gpt-3.5-turbo")
-                ;;
-            *)
-                log_with_timestamp "ERROR: Invalid OpenAI model: $model"
-                handle_validation_error "OpenAI model" "Invalid model: $model. Supported models: gpt-4o, gpt-4-turbo, gpt-3.5-turbo"
-                ;;
-        esac
+    case "$model" in
+        "gpt-4o"|"gpt-4-turbo"|"gpt-3.5-turbo")
+            ;;
+        *)
+            log_with_timestamp "ERROR: Invalid OpenAI model: $model"
+            handle_validation_error "OpenAI model" "Invalid model: $model. Supported models: gpt-4o, gpt-4-turbo, gpt-3.5-turbo"
+            ;;
+    esac
     fi
 }
 
@@ -601,6 +618,65 @@ validate_openai_config() {
 get_file_size() {
     local file="$1"
     stat -f%z "$file" 2>/dev/null || echo "0"
+}
+
+
+# RECITATION error detection function
+is_recitation_error() {
+    local response_file="$1"
+    
+    if [[ -f "$response_file" ]]; then
+        if grep -q '"finishReason": "RECITATION"' "$response_file" 2>/dev/null; then
+            return 0  # RECITATIONエラー
+        fi
+    fi
+    return 1  # 非RECITATIONエラー
+}
+
+# RECITATION error handler function  
+handle_recitation_error() {
+    local response_file="$1"
+    local batch_id="$2"
+    
+    log_with_timestamp "⚠️ RECITATION error detected - attempting PAID API fallback"
+    
+    # 環境変数を設定（PAID API強制使用）
+    export FORCE_PAID_API=true
+    
+    log_with_timestamp "🔄 Retrying with PAID API (File API mode)"
+    
+    return 0
+}
+
+# 503 Error Handling Functions
+is_503_error() {
+    local response_file="$1"
+    
+    if [[ -f "$response_file" ]]; then
+        if grep -q '"code": 503' "$response_file" 2>/dev/null; then
+            return 0  # 503エラー
+        fi
+    fi
+    return 1  # 非503エラー
+}
+
+handle_503_error_retry() {
+    local retry_count="${GEMINI_RETRY_COUNT:-0}"
+    local max_retries=3
+    
+    if [ "$retry_count" -lt "$max_retries" ]; then
+        local new_retry_count=$((retry_count + 1))
+        local wait_time=$((new_retry_count * 10))  # 10秒, 20秒, 30秒
+        
+        log_with_timestamp "🔄 503エラー: リトライ ${new_retry_count}/${max_retries} (${wait_time}秒待機)"
+        sleep $wait_time
+        
+        export GEMINI_RETRY_COUNT=$new_retry_count
+        return 2  # 特別なリトライコード
+    else
+        log_with_timestamp "❌ 503エラー: リトライ上限到達"
+        return 1
+    fi
 }
 
 # Helper functions for PDF download
@@ -619,34 +695,34 @@ download_pdf_from_url() {
     
     # First attempt: Try with comprehensive browser headers (without Accept-Encoding to avoid PDF corruption)
     curl -L --http1.1 --silent --show-error \
-        -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7" \
-        -H "Accept-Language: ja,en-US;q=0.9,en;q=0.8" \
-        -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
-        -H "Sec-Fetch-Dest: document" \
-        -H "Sec-Fetch-Mode: navigate" \
-        -H "Sec-Fetch-Site: same-origin" \
-        -H "Sec-Fetch-User: ?1" \
-        -H "Cache-Control: max-age=0" \
-        -H "Upgrade-Insecure-Requests: 1" \
-        --connect-timeout "$DEFAULT_CONNECT_TIMEOUT" --max-time "$DEFAULT_MAX_TIME" \
-        -o "$pdf_file" "$pdf_url" 2>"$temp_error_file" || curl_exit_code=$?
+    -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7" \
+    -H "Accept-Language: ja,en-US;q=0.9,en;q=0.8" \
+    -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+    -H "Sec-Fetch-Dest: document" \
+    -H "Sec-Fetch-Mode: navigate" \
+    -H "Sec-Fetch-Site: same-origin" \
+    -H "Sec-Fetch-User: ?1" \
+    -H "Cache-Control: max-age=0" \
+    -H "Upgrade-Insecure-Requests: 1" \
+    --connect-timeout "$DEFAULT_CONNECT_TIMEOUT" --max-time "$DEFAULT_MAX_TIME" \
+    -o "$pdf_file" "$pdf_url" 2>"$temp_error_file" || curl_exit_code=$?
     
     # If first attempt failed, try with simpler headers
     if [ $curl_exit_code -ne 0 ] || [ ! -s "$pdf_file" ]; then
-        log_with_timestamp "First download attempt failed, trying with simpler headers"
-        rm -f "$pdf_file" 2>/dev/null || true
-        curl_exit_code=0
-        curl -L --http1.1 --silent --show-error \
-            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
-            -H "Accept: application/pdf,*/*" \
-            --connect-timeout "$DEFAULT_CONNECT_TIMEOUT" --max-time "$DEFAULT_MAX_TIME" \
-            -o "$pdf_file" "$pdf_url" 2>"$temp_error_file" || curl_exit_code=$?
+    log_with_timestamp "First download attempt failed, trying with simpler headers"
+    rm -f "$pdf_file" 2>/dev/null || true
+    curl_exit_code=0
+    curl -L --http1.1 --silent --show-error \
+        -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+        -H "Accept: application/pdf,*/*" \
+        --connect-timeout "$DEFAULT_CONNECT_TIMEOUT" --max-time "$DEFAULT_MAX_TIME" \
+        -o "$pdf_file" "$pdf_url" 2>"$temp_error_file" || curl_exit_code=$?
     fi
     
     # Validate download result
     if ! validate_pdf_file "$pdf_file" "$curl_exit_code" "$temp_error_file" "$pdf_url"; then
-        rm -f "$temp_error_file"
-        return 1
+    rm -f "$temp_error_file"
+    return 1
     fi
     
     rm -f "$temp_error_file" 2>/dev/null || true
@@ -664,17 +740,17 @@ handle_local_pdf_file() {
     
     # Check if called from scanPDF.sh by looking at the source file path
     if echo "$pdf_url" | grep -q "/scan/unprocessed/"; then
-        # For scanPDF.sh, move the file instead of copy to avoid reprocessing
-        if ! mv "$pdf_url" "$pdf_file" 2>/dev/null; then
-            handle_file_error "move" "$pdf_url" "PDF file move failed"
-        fi
-        log_with_timestamp "PDF move completed successfully"
+    # For scanPDF.sh, move the file instead of copy to avoid reprocessing
+    if ! mv "$pdf_url" "$pdf_file" 2>/dev/null; then
+        handle_file_error "move" "$pdf_url" "PDF file move failed"
+    fi
+    log_with_timestamp "PDF move completed successfully"
     else
-        # For clipPDF.sh, still copy (don't move user's original file)
-        if ! cp "$pdf_url" "$pdf_file" 2>/dev/null; then
-            handle_file_error "copy" "$pdf_url" "PDF file copy failed"
-        fi
-        log_with_timestamp "PDF copy completed successfully"
+    # For clipPDF.sh, still copy (don't move user's original file)
+    if ! cp "$pdf_url" "$pdf_file" 2>/dev/null; then
+        handle_file_error "copy" "$pdf_url" "PDF file copy failed"
+    fi
+    log_with_timestamp "PDF copy completed successfully"
     fi
     
     return 0
@@ -689,12 +765,12 @@ validate_pdf_file() {
     
     # Check if download was successful
     if [ $curl_exit_code -ne 0 ] || [ ! -s "$pdf_file" ]; then
-        local error_msg="$(cat "$temp_error_file" 2>/dev/null | head -3 | tr '\n' ' ')"
-        local file_size=$(get_file_size "$pdf_file")
-        
-        log_with_timestamp "PDF download failed: exit code $curl_exit_code, file size: $file_size bytes, error: $error_msg"
-        handle_file_error "download" "$pdf_url" "Server access denied or download failed"
-        return 1
+    local error_msg="$(cat "$temp_error_file" 2>/dev/null | head -3 | tr '\n' ' ')"
+    local file_size=$(get_file_size "$pdf_file")
+    
+    log_with_timestamp "PDF download failed: exit code $curl_exit_code, file size: $file_size bytes, error: $error_msg"
+    handle_file_error "download" "$pdf_url" "Server access denied or download failed"
+    return 1
     fi
     
     return 0
@@ -706,16 +782,16 @@ get_page_count() {
     local pdf_file="$1"
     
     if [ -z "$pdf_file" ] || [ ! -f "$pdf_file" ]; then
-        echo "0"
-        return 1
+    echo "0"
+    return 1
     fi
     
     if command -v pdfinfo >/dev/null 2>&1; then
-        local page_count=$(pdfinfo "$pdf_file" 2>/dev/null | grep "Pages:" | awk '{print $2}')
-        if [[ "$page_count" =~ ^[0-9]+$ ]]; then
-            echo "$page_count"
-            return 0
-        fi
+    local page_count=$(pdfinfo "$pdf_file" 2>/dev/null | grep "Pages:" | awk '{print $2}')
+    if [[ "$page_count" =~ ^[0-9]+$ ]]; then
+        echo "$page_count"
+        return 0
+    fi
     fi
     
     echo "0"
@@ -727,18 +803,18 @@ calculate_optimal_dpi() {
     local page_count="$1"
     
     if [ -z "$page_count" ] || ! [[ "$page_count" =~ ^[0-9]+$ ]]; then
-        echo "300"
-        return 1
+    echo "300"
+    return 1
     fi
     
     if [ "$page_count" -gt 150 ]; then
-        echo "200"  # Extra large files: maximum compression
+    echo "200"  # Extra large files: maximum compression
     elif [ "$page_count" -gt 50 ]; then
-        echo "225"  # Large files: high compression
+    echo "225"  # Large files: high compression
     elif [ "$page_count" -gt 20 ]; then
-        echo "250"  # Medium files: moderate compression
+    echo "250"  # Medium files: moderate compression
     else
-        echo "300"  # Small files: maintain quality
+    echo "300"  # Small files: maintain quality
     fi
     
     return 0
@@ -747,23 +823,30 @@ calculate_optimal_dpi() {
 # Function: Optimize PNG files using optipng
 optimize_png_files() {
     local png_pattern="$1"
-    local optimization_level="${2:-7}"
+    local optimization_level="${2:-2}"
+    
+    # Skip PNG optimization if requested (for testing)
+    if [ "${SKIP_PNG_OPTIMIZATION:-}" = "true" ]; then
+    log_with_timestamp "🔧 PNG optimization skipped"
+    return 0
+    fi
+    
     
     if [ -z "$png_pattern" ]; then
-        log_with_timestamp "⚠️ PNG pattern not specified, skipping optimization"
-        return 1
+    log_with_timestamp "⚠️ PNG pattern not specified, skipping optimization"
+    return 1
     fi
     
     if ! command -v optipng >/dev/null 2>&1; then
-        log_with_timestamp "⚠️ optipng not available, skipping PNG optimization"
-        return 1
+    log_with_timestamp "⚠️ optipng not available, skipping PNG optimization"
+    return 1
     fi
     
-    local png_files=($(find . -name "$png_pattern" -type f 2>/dev/null))
+    local png_files=($(find . -name "$png_pattern" -type f 2>/dev/null | sort -V))
     
     if [ ${#png_files[@]} -eq 0 ]; then
-        log_with_timestamp "⚠️ No PNG files found matching pattern '$png_pattern'"
-        return 1
+    log_with_timestamp "⚠️ No PNG files found matching pattern '$png_pattern'"
+    return 1
     fi
     
     log_with_timestamp "🔧 Starting PNG optimization for ${#png_files[@]} files..."
@@ -772,13 +855,18 @@ optimize_png_files() {
     local failed_count=0
     
     for png_file in "${png_files[@]}"; do
-        if [ -f "$png_file" ]; then
-            if optipng -o"$optimization_level" "$png_file" >/dev/null 2>&1; then
-                ((optimized_count++))
-            else
-                ((failed_count++))
-            fi
+    if [ -f "$png_file" ]; then
+        log_with_timestamp "🔧 Optimizing: $(basename "$png_file")"
+        # Use timeout to prevent hanging (600 seconds per file)
+        # Use maximum optimization level 7 with metadata stripping for 50% size reduction
+        if timeout 600s optipng -o7 -strip all "$png_file" >/dev/null 2>&1; then
+            ((optimized_count++))
+            log_with_timestamp "✅ Optimized: $(basename "$png_file")"
+        else
+            ((failed_count++))
+            log_with_timestamp "⚠️ Failed/Timeout: $(basename "$png_file")"
         fi
+    fi
     done
     
     log_with_timestamp "✅ PNG optimization completed: $optimized_count optimized, $failed_count failed"
@@ -786,16 +874,82 @@ optimize_png_files() {
     return 0
 }
 
+# Function: Determine API strategy based on PNG Base64 size
+determine_api_strategy_v2() {
+    local pdf_file="$1"
+    
+    # Validate input
+    if [[ ! -f "$pdf_file" ]]; then
+        log_with_timestamp "⚠️ PDF file not found: $pdf_file"
+        echo "PAID_API"
+        return 1
+    fi
+    
+    # Get page count and calculate optimal DPI
+    local page_count=$(get_page_count "$pdf_file")
+    local optimal_dpi=$(calculate_optimal_dpi "$page_count")
+    
+    log_with_timestamp "📊 Analyzing PDF: ${page_count} pages, DPI: ${optimal_dpi}"
+    
+    # Create temporary directory for PNG conversion
+    local temp_png_dir=$(mktemp -d)
+    cd "$temp_png_dir"
+    
+    # Convert PDF to PNG for measurement
+    log_with_timestamp "🔄 Converting PDF to PNG for size measurement..."
+    if ! pdftoppm -png -r "$optimal_dpi" "$pdf_file" page 2>/dev/null; then
+        log_with_timestamp "⚠️ PNG conversion failed, falling back to PAID API"
+        rm -rf "$temp_png_dir"
+        echo "PAID_API"
+        return 1
+    fi
+    
+    # Optimize PNG files to reduce size (using maximum optimization for 50% reduction)
+    optimize_png_files "page-*.png" 7
+    
+    # Calculate total Base64 size
+    local total_base64_size=0
+    local png_count=0
+    
+    for png_file in page-*.png; do
+        if [[ -f "$png_file" ]]; then
+            local png_base64=$(base64 -i "$png_file" 2>/dev/null || base64 "$png_file" 2>/dev/null)
+            local png_size=${#png_base64}
+            total_base64_size=$((total_base64_size + png_size))
+            ((png_count++))
+        fi
+    done
+    
+    local total_mb=$(echo "scale=2; $total_base64_size / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
+    log_with_timestamp "📏 Measured: ${png_count} pages, Base64 total: ${total_mb}MB"
+    
+    # Calculate threshold in MB for logging
+    local threshold_mb=$(echo "scale=2; $API_SIZE_THRESHOLD / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
+    
+    # Determine API based on threshold
+    if [[ $total_base64_size -le $API_SIZE_THRESHOLD ]]; then
+        log_with_timestamp "💰 Selected FREE API (${total_mb}MB ≤ ${threshold_mb}MB)"
+        CONVERTED_PNG_DIR="$temp_png_dir"
+        export PNG_DPI="$optimal_dpi"
+        return 0
+    else
+        log_with_timestamp "🏆 Selected PAID API (${total_mb}MB > ${threshold_mb}MB)"
+        rm -rf "$temp_png_dir"
+        return 1
+    fi
+}
+
+
 download_pdf() {
     local pdf_url="$1"
     local pdf_file="$2"
     
     if [ "$IS_URL" = true ]; then
-        # Use helper function for URL downloads
-        download_pdf_from_url "$pdf_url" "$pdf_file"
+    # Use helper function for URL downloads
+    download_pdf_from_url "$pdf_url" "$pdf_file"
     else
-        # Use helper function for local file handling
-        handle_local_pdf_file "$pdf_url" "$pdf_file"
+    # Use helper function for local file handling
+    handle_local_pdf_file "$pdf_url" "$pdf_file"
     fi
     
     # Get page count and calculate optimal DPI
@@ -817,10 +971,10 @@ convert_pdf_to_images() {
     
     # Ensure we have a valid DPI value (fallback to 300 if not set)
     if [ -z "$dpi" ] || ! [[ "$dpi" =~ ^[0-9]+$ ]]; then
-        dpi="300"
-        log_with_timestamp "⚠️ PDF_DPI not set or invalid, using fallback DPI: $dpi"
+    dpi="300"
+    log_with_timestamp "⚠️ PDF_DPI not set or invalid, using fallback DPI: $dpi"
     else
-        log_with_timestamp "✅ Using optimized DPI: $dpi"
+    log_with_timestamp "✅ Using optimized DPI: $dpi"
     fi
     
     log_with_timestamp "Starting PDF to image conversion (DPI: $dpi)"
@@ -828,14 +982,14 @@ convert_pdf_to_images() {
     
     cd "$tmp_dir"
     if ! pdftoppm -png -r "$dpi" downloaded.pdf page 2>/dev/null; then
-        handle_file_error "convert" "PDF to images" "PDF conversion to images failed"
+    handle_file_error "pdf_conversion" "PDF to images" "PDF conversion to images failed"
     fi
     
     local image_count=$(ls page-*.png 2>/dev/null | wc -l | tr -d ' ')
     log_with_timestamp "PDF conversion completed. Generated $image_count images"
     
-    # Optimize PNG files for size reduction
-    optimize_png_files "page-*.png"
+    # Optimize PNG files for size reduction (using maximum optimization for 50% reduction)
+    optimize_png_files "page-*.png" 7
     
     update_state "pdf_converted" "image_count=$image_count,dpi=$dpi"
 }
@@ -852,9 +1006,13 @@ determine_output_directory() {
     local content_base="${CONTENT_BASE_DIR:-vault}"
     local base_path="$vault_dir/$content_base"
     
-    # Determine save location based on PDF URL and PRIMARY_TAG
+    # Determine save location based on PRIMARY_TAG first, then URL/file type
     if [ "$PRIMARY_TAG" = "paper" ]; then
         local output_dir="$base_path/${PAPER_OUTPUT_DIR:-paper}"
+    elif [ "$PRIMARY_TAG" = "clip" ]; then
+        local output_dir="$base_path/${CLIP_OUTPUT_DIR:-clip}"
+    elif [ "$PRIMARY_TAG" = "scan" ]; then
+        local output_dir="$base_path/${SCAN_OUTPUT_DIR:-scan}"
     elif echo "$pdf_url" | grep -q "^https\?://"; then
         local output_dir="$base_path/${CLIP_OUTPUT_DIR:-clip}"
     else
@@ -887,32 +1045,6 @@ copy_files_to_destination() {
     echo "$pdf_target"
 }
 
-# Update markdown file with PDF references (single link - legacy)
-update_markdown_references() {
-    local markdown_file="$1"
-    local filename="$2"
-    local vault_dir="$3"
-    
-    local relative_pdf_path="../${ATTACHMENTS_DIR}/${filename}.pdf"
-    
-    # Update file reference in markdown - add before the closing --- of frontmatter
-    if grep -q "^tags:" "$markdown_file"; then
-        # Find the line number of the second --- (closing frontmatter)
-        local closing_line=$(grep -n "^---$" "$markdown_file" | sed -n '2p' | cut -d: -f1)
-        if [ -n "$closing_line" ]; then
-            # Insert file: line before the closing --- with proper newline
-            # Insert file: entry before closing frontmatter using head/tail approach
-            head -n $((closing_line - 1)) "$markdown_file" > "${markdown_file}.tmp"
-            echo "file: $relative_pdf_path" >> "${markdown_file}.tmp"
-            tail -n +$closing_line "$markdown_file" >> "${markdown_file}.tmp"
-            mv "${markdown_file}.tmp" "$markdown_file"
-        fi
-    fi
-    
-    # Add PDF reference at the end of the file
-    echo "" >> "$markdown_file"
-    echo "![PDFファイル]($relative_pdf_path)" >> "$markdown_file"
-}
 
 # Update markdown file with dual PDF references (restored functionality)
 update_markdown_references_with_dual_links() {
@@ -925,16 +1057,16 @@ update_markdown_references_with_dual_links() {
     
     # Update file reference in markdown frontmatter
     if grep -q "^tags:" "$markdown_file"; then
-        # Find the line number of the second --- (closing frontmatter)
-        local closing_line=$(grep -n "^---$" "$markdown_file" | sed -n '2p' | cut -d: -f1)
-        if [ -n "$closing_line" ]; then
-            # Insert file: line before the closing --- with proper newline
-            # Insert file: entry before closing frontmatter using head/tail approach
-            head -n $((closing_line - 1)) "$markdown_file" > "${markdown_file}.tmp"
-            echo "file: $relative_pdf_path" >> "${markdown_file}.tmp"
-            tail -n +$closing_line "$markdown_file" >> "${markdown_file}.tmp"
-            mv "${markdown_file}.tmp" "$markdown_file"
-        fi
+    # Find the line number of the second --- (closing frontmatter)
+    local closing_line=$(grep -n "^---$" "$markdown_file" | sed -n '2p' | cut -d: -f1)
+    if [ -n "$closing_line" ]; then
+        # Insert file: line before the closing --- with proper newline
+        # Insert file: entry before closing frontmatter using head/tail approach
+        head -n $((closing_line - 1)) "$markdown_file" > "${markdown_file}.tmp"
+        echo "file: $relative_pdf_path" >> "${markdown_file}.tmp"
+        tail -n +$closing_line "$markdown_file" >> "${markdown_file}.tmp"
+        mv "${markdown_file}.tmp" "$markdown_file"
+    fi
     fi
     echo "" >> "$markdown_file"
     echo "[pdf_relative]($relative_pdf_path)" >> "$markdown_file"
@@ -943,10 +1075,11 @@ update_markdown_references_with_dual_links() {
 
 # Save files
 save_files() {
-    local title="$1"
+    local title="${1:-}"
     local vault_dir="$2"
     local tmp_dir="$3"
     local pdf_url="$4"
+    
     
     # Generate filename
     local date_prefix=$(date +%Y%m%d)
@@ -989,7 +1122,7 @@ handle_validation_error() {
     handle_error "$full_msg"
 }
 
-# Handle API errors (Gemini, Claude, OpenAI failures)
+# Handle API errors (Gemini, OpenAI failures)
 handle_api_error() {
     local api_name="$1"
     local operation="$2"
@@ -998,43 +1131,37 @@ handle_api_error() {
     handle_error "$full_msg"
 }
 
-# Handle file operation errors (download, copy, move, convert)
+# Handle file operation errors (download, copy, move, pdf_conversion)
 handle_file_error() {
     local operation="$1"
     local file_path="$2"
     local error_details="${3:-}"
     local full_msg="File $operation error: $file_path"
     if [ -n "$error_details" ]; then
-        full_msg="$full_msg - $error_details"
+    full_msg="$full_msg - $error_details"
     fi
     handle_error "$full_msg"
 }
 
-# Handle curl/network errors with retry context
-handle_curl_error() {
-    local url="$1"
-    local operation="$2"
-    local retry_info="${3:-}"
-    local full_msg="Network error during $operation: $url"
-    if [ -n "$retry_info" ]; then
-        full_msg="$full_msg ($retry_info)"
-    fi
-    handle_error "$full_msg"
-}
 
 # Cleanup function
 cleanup() {
     # Prevent duplicate cleanup execution
     if [ "${CLEANUP_DONE:-false}" = "true" ]; then
-        return
+    return
     fi
     CLEANUP_DONE=true
     
     local success="${1:-false}"  # Default to false (failure)
     
-    # Send failure notification if needed (without logging to TMP_DIR)
-    if [ -n "${ERROR_MSG:-}" ]; then
-        local thread_ts=$(get_thread_ts)
+    # Save logs to file only on failure
+    if [ "$success" = "false" ] && [ -n "${ERROR_MSG:-}" ]; then
+        save_failed_logs
+        
+        local thread_ts=""
+        if [ -f "$THREAD_TS_FILE" ]; then
+            thread_ts=$(cat "$THREAD_TS_FILE")
+        fi
         # Calculate processing duration
         local processing_duration=$(calculate_processing_duration "${START_TIME:-}")
         # Send failure notification with token info
@@ -1046,29 +1173,15 @@ cleanup() {
         rm -rf "$TMP_DIR" 2>/dev/null
     fi
     
-    # Handle log file based on success/failure
-    if [ -n "${LOG_FILE:-}" ] && [ -f "$LOG_FILE" ]; then
-        if [ "$success" = "true" ]; then
-            # Success: Remove log file to prevent accumulation
-            rm -f "$LOG_FILE" 2>/dev/null
-        else
-            # Failure: Preserve log file in failed_logs directory
-            local failed_logs_dir="$SCRIPT_DIR/failed_logs"
-            mkdir -p "$failed_logs_dir"
-            local timestamp=$(date +%Y%m%d_%H%M%S)
-            local log_basename=$(basename "$LOG_FILE")
-            local preserved_log="$failed_logs_dir/${timestamp}_${log_basename}"
-            cp "$LOG_FILE" "$preserved_log" 2>/dev/null
-            log_with_timestamp "Failed log preserved: $preserved_log"
-        fi
-    fi
+    # Emergency logs are automatically preserved in failed_logs directory
+    # No manual log file handling needed
 }
 
 
 # Get thread timestamp
 get_thread_ts() {
     if [ -f "$THREAD_TS_FILE" ]; then
-        cat "$THREAD_TS_FILE"
+    cat "$THREAD_TS_FILE"
     fi
 }
 
@@ -1087,69 +1200,69 @@ save_thread_ts() {
 
 
 
-# Determine processing mode and API key automatically based on payload size
-determine_processing_mode_and_api() {
-    local payload_size="$1"
-    local threshold=19000000   # 19MB threshold for paid batch testing (temporary for verification)
+# Determine processing mode and API key based on PNG Base64 size
+determine_processing_mode_by_pdf() {
+    local pdf_file="$1"
     
-    if [ "$payload_size" -le "$threshold" ]; then
-        # Small payload: Use free API with REALTIME mode
-        log_with_timestamp "🆓 FREE/REALTIME"
+    # Use new strategy function (direct call to allow global variable assignment)
+    if determine_api_strategy_v2 "$pdf_file"; then
+        # Small payload: Use free API with PNG Base64
+        local free_key=$(grep "AI_API_KEY_FREE=" "$VAULT_DIR/.env" 2>/dev/null | sed 's/^AI_API_KEY_FREE=//' | sed 's/ # .*//')
+        if [ -z "$free_key" ]; then
+            log_with_timestamp "ERROR: AI_API_KEY_FREE is required but not set"
+            exit 1
+        fi
+        
+        log_with_timestamp "🆓 FREE/REALTIME with PNG Base64"
         export PROCESSING_MODE="REALTIME" 
-        export SELECTED_API_KEY="$AI_API_KEY"
+        export SELECTED_API_KEY="$free_key"
+        export USE_PNG_BASE64="true"
+        export USE_FILE_API="false"  # Never use File API with FREE
         return 0
     else
-        # Large payload: Use paid API with BATCH mode
+        # Large payload: Use paid API with PDF File API
         local paid_key=$(grep "AI_API_KEY_PAID=" "$VAULT_DIR/.env" 2>/dev/null | sed 's/^AI_API_KEY_PAID=//' | sed 's/ # .*//')
-        
-        if [ -n "$paid_key" ]; then
-            log_with_timestamp "💰 PAID/BATCH"
-            export PROCESSING_MODE="BATCH"
-            export SELECTED_API_KEY="$paid_key" 
-            return 0
-        else
-            log_with_timestamp "❌ SKIP: Large payload requires PAID API key (Free API cannot handle >19MB)"
-            return 1
+        if [ -z "$paid_key" ]; then
+            log_with_timestamp "ERROR: AI_API_KEY_PAID is required for large files but not set"
+            exit 1
         fi
+        
+        log_with_timestamp "💰 PAID/BATCH with PDF File API"
+        export PROCESSING_MODE="BATCH"
+        export SELECTED_API_KEY="$paid_key"
+        export USE_PNG_BASE64="false"
+        export USE_FILE_API="true"  # Use File API with PAID
+        return 0
     fi
 }
 
-# Enhanced encode function with size checking and API selection
-encode_images_to_base64_with_size_check() {
-    local json_parts_file="$1"
-    for img in page-*.png; do
-        if [ -f "$img" ]; then
-            local base64_data=$(base64 -i "$img" | tr -d '
-')
-            echo ",{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"$base64_data\"}}" >> "$json_parts_file"
-        fi
-    done
+# Direct PDF File API upload (always uses File API)
+upload_pdf_to_file_api() {
+    local pdf_file="$1"
     
-    # 🔥 統一ロジック: エンコード後のサイズで一度だけAPI選択判定
-    local payload_size=$(wc -c < "$json_parts_file" 2>/dev/null || echo "0")
-    log_with_timestamp "Encoded payload size: $payload_size bytes"
+    # Get PDF size for API selection
+    local pdf_size=$(get_file_size "$pdf_file")
+    log_with_timestamp "📄 PDF file size: $pdf_size bytes"
     
-    # Determine processing mode and API key based on encoded payload size
-    determine_processing_mode_and_api "$payload_size"
-    local auto_selection_status=$?
+    # Upload PDF to File API
+    local file_uri=$(upload_file_to_file_api "$pdf_file" "application/pdf")
     
-    # Store the payload size for later use
-    export PAYLOAD_SIZE="$payload_size"
-    
-    return $auto_selection_status
+    if [ -n "$file_uri" ]; then
+        export FILE_API_URI="$file_uri"
+        export FILE_API_MIME_TYPE="application/pdf"
+        export USE_FILE_API="true"
+        log_with_timestamp "✅ File API upload successful: $file_uri"
+        
+        # Determine API mode based on PNG Base64 size
+        determine_processing_mode_by_pdf "$pdf_file"
+        return $?
+    else
+        log_with_timestamp "❌ File API upload failed"
+        exit 1
+    fi
 }
 
 
-# Original encode images to base64 for API (kept for backward compatibility)
-encode_images_to_base64() {
-    local json_parts_file="$1"
-    for img in page-*.png; do
-        if [ -f "$img" ]; then
-            local base64_data=$(base64 -i "$img" | tr -d '\n')
-            echo ",{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"$base64_data\"}}" >> "$json_parts_file"
-        fi
-    done
-}
 
 
 # Process with Gemini realtime API
@@ -1159,58 +1272,143 @@ call_gemini_bash_api() {
     local escaped_prompt=$(escape_json "$prompt")
     
     # IMPORTANT: Use process-specific filename to avoid collisions in parallel processing
-    local json_parts_file=$(generate_temp_filename "json_parts" "tmp")
-    echo "{\"text\":\"$escaped_prompt\"}" > "$json_parts_file"
-    
-    encode_images_to_base64_with_size_check "$json_parts_file"
-    
-    # IMPORTANT: Use process-specific filename to avoid collisions in parallel processing
     local payload_file=$(generate_temp_filename "gemini_payload" "json")
-    {
-        echo '{"contents":[{"parts":['
-        cat "$json_parts_file" | tr -d '
-'
-        echo ']}],"generationConfig":{"temperature":'$TEMPERATURE'}}'
-    } > "$payload_file"
     
-    # API selection already done by encode_images_to_base64_with_size_check
+    # Check if using PNG Base64 for FREE API
+    if [ "${USE_PNG_BASE64:-false}" = "true" ] && [ -n "${CONVERTED_PNG_DIR:-}" ]; then
+        log_with_timestamp "🖼️ Using PNG Base64 inline payload for FREE API"
+        
+        # Build payload with PNG images
+        {
+            echo '{"contents":[{"parts":['
+            
+            # Add prompt text
+            echo "{\"text\":\"$escaped_prompt\"}"
+            
+            # Add each PNG as Base64
+            for png_file in "$CONVERTED_PNG_DIR"/page-*.png; do
+                if [[ -f "$png_file" ]]; then
+                    echo ','
+                    echo '{"inline_data":{'
+                    echo '"mime_type":"image/png",'
+                    echo -n '"data":"'
+                    base64 -i "$png_file" 2>/dev/null || base64 "$png_file" 2>/dev/null | tr -d '\n'
+                    echo '"'
+                    echo '}}'
+                fi
+            done
+            
+            echo ']}],"generationConfig":{"temperature":'$TEMPERATURE'}}'
+        } > "$payload_file"
+        
+    elif [ "$USE_FILE_API" = "true" ] && [ -n "$FILE_API_URI" ]; then
+        log_with_timestamp "🔗 Using File API payload format for PAID API"
+        generate_file_api_payload "$FILE_API_URI" "$FILE_API_MIME_TYPE" "$escaped_prompt" > "$payload_file"
+        
+    else
+        # Fallback: should not reach here in normal flow
+        log_with_timestamp "⚠️ Fallback: Creating PDF from images for File API"
+        
+        # For backward compatibility: still try to process images if neither mode is set
+        local json_parts_file=$(generate_temp_filename "json_parts" "tmp")
+        echo "{\"text\":\"$escaped_prompt\"}" > "$json_parts_file"
+        upload_pdf_to_file_api "$json_parts_file"
+        rm -f "$json_parts_file"
+        
+        if [ -n "$FILE_API_URI" ]; then
+            generate_file_api_payload "$FILE_API_URI" "$FILE_API_MIME_TYPE" "$escaped_prompt" > "$payload_file"
+        else
+            log_with_timestamp "ERROR: No valid processing mode"
+            return 1
+        fi
+    fi
+    
+    # API selection already done by upload_pdf_to_file_api
     # Using SELECTED_API_KEY and PROCESSING_MODE set earlier
     
 
     
-    rm -f "$json_parts_file"
     
     # IMPORTANT: Use process-specific filename to avoid collisions in parallel processing
     local response_file=$(generate_temp_filename "api_response" "json")
     
-    # Debug logging for troubleshooting REALTIME issues
-    local actual_api_key="${SELECTED_API_KEY:-$AI_API_KEY}"
-    log_with_timestamp "DEBUG REALTIME: API key prefix: ${actual_api_key:0:20}..."
-    log_with_timestamp "DEBUG REALTIME: Processing mode: ${PROCESSING_MODE:-UNKNOWN}"
-    log_with_timestamp "DEBUG REALTIME: API endpoint: $GEMINI_BASE_URL/models/$AI_MODEL:generateContent"
     
+    # Make API call with verbose error logging
+    local curl_exit_code=0
     if curl -s -X POST \
-        "$GEMINI_BASE_URL/models/$AI_MODEL:generateContent" \
-        -H "Content-Type: application/json" \
-        -H "x-goog-api-key: ${SELECTED_API_KEY:-$AI_API_KEY}" \
-        -d "@$payload_file" \
-        --connect-timeout "$REALTIME_API_TIMEOUT" \
-        --max-time "$REALTIME_API_MAX_TIME" \
-        -o "$response_file"; then
-        
-        local raw_text=$(sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' "$response_file" | head -1)
-        
-        rm -f "$payload_file" "$response_file"
-        
-        if [ -n "$raw_text" ]; then
-            process_api_response_text "$raw_text"
-            return 0
+    "$GEMINI_BASE_URL/models/$AI_MODEL:generateContent" \
+    -H "Content-Type: application/json" \
+    -H "x-goog-api-key: ${SELECTED_API_KEY:-$AI_API_KEY}" \
+    -d "@$payload_file" \
+    --connect-timeout "$REALTIME_API_TIMEOUT" \
+    --max-time "$REALTIME_API_MAX_TIME" \
+    -o "$response_file"; then
+    
+    # Check if response contains error
+    if grep -q '"error"' "$response_file" 2>/dev/null; then
+        # 503エラーの場合はリトライ処理
+        if is_503_error "$response_file"; then
+            log_with_timestamp "⚠️ 503エラーが発生しました"
+            rm -f "$payload_file" "$response_file"
+            
+            local retry_result
+            handle_503_error_retry
+            retry_result=$?
+            
+            if [ $retry_result -eq 2 ]; then
+                # リトライを続行
+                call_gemini_bash_api "$prompt"
+                return $?
+            else
+                # リトライ上限到達
+                return 1
+            fi
         else
+            # その他のエラーの場合は従来の処理
+            log_with_timestamp "❌ Gemini API returned error response:"
+            local error_content=$(cat "$response_file")
+            log_with_timestamp "$error_content"
+            rm -f "$payload_file" "$response_file"
             return 1
         fi
+    fi
+    
+    local raw_text=$(jq -r '.candidates[0].content.parts[0].text // empty' "$response_file" 2>/dev/null || echo "")
+    
+    if [ -n "$raw_text" ]; then
+        log_with_timestamp "✅ Gemini API response received successfully"
+        rm -f "$payload_file" "$response_file"
+        process_api_response_text "$raw_text" > "$TMP_DIR/gemini_output.log"
+        return 0
     else
+        # Check for RECITATION error first
+        if is_recitation_error "$response_file"; then
+            log_with_timestamp "⚠️ RECITATION error detected"
+            handle_recitation_error "$response_file" "${batch_id:-""}"
+            rm -f "$payload_file" "$response_file"
+            return 2  # Special return code for RECITATION error
+        fi
+        
+        # Check if response has proper structure but no text (image unreadable)
+        if grep -q '"parts"' "$response_file" 2>/dev/null; then
+            log_with_timestamp "❌ Gemini could not extract readable text from the image(s)"
+        else
+            log_with_timestamp "❌ Gemini returned response without text content (image may be unprocessable)"
+        fi
+        log_with_timestamp "Response content:"
+        cat "$response_file" | head -10 >&2
         rm -f "$payload_file" "$response_file"
         return 1
+    fi
+    else
+    curl_exit_code=$?
+    log_with_timestamp "❌ Curl command failed with exit code: $curl_exit_code"
+    if [ -s "$response_file" ]; then
+        log_with_timestamp "Response content:"
+        cat "$response_file"
+    fi
+    rm -f "$payload_file" "$response_file"
+    return 1
     fi
 }
 
@@ -1228,16 +1426,33 @@ create_batch_request() {
     local json_parts_file=$(generate_temp_filename "json_parts" "tmp")
     echo "{\"text\":\"$escaped_prompt\"}" > "$json_parts_file"
     
-    encode_images_to_base64_with_size_check "$json_parts_file"
+    # For BATCH processing, always use File API for optimal performance
+    log_with_timestamp "Using File API for batch processing (PAID API always uses File API)"
     
-    # Create batch request with inline format
-    echo -n '{"batch":{"display_name":"pdf-ocr-'$TIMESTAMP'","input_config":{"requests":{"requests":[{"request":{"contents":[{"parts":[' > "$request_file"
-    cat "$json_parts_file" | tr -d '
-' >> "$request_file"
-    echo ']}],"generationConfig":{"temperature":'$TEMPERATURE'}},"metadata":{"key":"request-1"}}]}}}}' >> "$request_file"
+    # Use original PDF directly for File API upload (no re-generation needed)
+    local pdf_file="$TMP_DIR/downloaded.pdf"
     
-    # API selection already done by encode_images_to_base64_with_size_check
-    # Using SELECTED_API_KEY and PROCESSING_MODE set earlier
+    local file_uri=$(upload_file_to_file_api "$pdf_file" "application/pdf")
+    if [ -z "$file_uri" ]; then
+        log_with_timestamp "ERROR: File API upload failed"
+        rm -f "$json_parts_file"
+        return 1
+    fi
+    
+    log_with_timestamp "PDF uploaded successfully via File API: $file_uri"
+    
+    # Create 8/25 format batch request (proven working format)
+    echo -n '{"batch":{"display_name":"pdf-ocr-'$TIMESTAMP'","input_config":{"requests":{"requests":[{"request":' > "$request_file"
+    generate_file_api_payload "$file_uri" "application/pdf" "$escaped_prompt" | tr -d '\n' >> "$request_file"
+    echo ',"metadata":{"key":"request-1"}}]}}}}' >> "$request_file"
+    
+    # Validate request_file before use
+    if [ ! -f "$request_file" ] || [ ! -s "$request_file" ]; then
+        log_with_timestamp "ERROR: Batch request file is empty or missing: $request_file"
+        return 1
+    fi
+    
+    # Using SELECTED_API_KEY and PROCESSING_MODE set by determine_processing_mode_by_pdf_size()
     
     rm -f "$json_parts_file"
 }
@@ -1256,28 +1471,28 @@ validate_curl_parameters() {
     local api_key="$6"
     
     if [ -z "$url" ] || [ -z "$output_file" ]; then
-        log_with_timestamp "ERROR: URL and output file are required"
-        return 1
+    log_with_timestamp "ERROR: URL and output file are required"
+    return 1
     fi
     
     if [ "$max_retries" -lt 1 ] || [ "$max_retries" -gt 10 ]; then
-        log_with_timestamp "ERROR: max_retries must be between 1 and 10"
-        return 1
+    log_with_timestamp "ERROR: max_retries must be between 1 and 10"
+    return 1
     fi
     
     if [ "$base_delay" -lt 1 ] || [ "$base_delay" -gt 30 ]; then
-        log_with_timestamp "ERROR: base_delay must be between 1 and 30 seconds"
-        return 1
+    log_with_timestamp "ERROR: base_delay must be between 1 and 30 seconds"
+    return 1
     fi
     
-    if [ "$timeout" -lt 5 ] || [ "$timeout" -gt 300 ]; then
-        log_with_timestamp "ERROR: timeout must be between 5 and 300 seconds"
-        return 1
+    if [ "$timeout" -lt 5 ] || [ "$timeout" -gt 28800 ]; then
+    log_with_timestamp "ERROR: timeout must be between 5 and 28800 seconds (8 hours)"
+    return 1
     fi
     
     if [ -z "$api_key" ]; then
-        log_with_timestamp "ERROR: API key is required"
-        return 1
+    log_with_timestamp "ERROR: API key is required"
+    return 1
     fi
     
     return 0
@@ -1297,13 +1512,13 @@ perform_curl_request() {
     # Perform curl with proper error capture
     local curl_exit_code=0
     curl -s -X GET \
-        "$url" \
-        -H "x-goog-api-key: $api_key" \
-        --connect-timeout "$timeout" \
-        --max-time $((timeout * 2)) \
-        -o "$output_file" \
-        --write-out "CURL_STATUS:%{http_code};SIZE:%{size_download};TIME:%{time_total}" \
-        2>"$temp_error_file" || curl_exit_code=$?
+    "$url" \
+    -H "x-goog-api-key: $api_key" \
+    --connect-timeout "$timeout" \
+    --max-time $((timeout * 2)) \
+    -o "$output_file" \
+    --write-out "CURL_STATUS:%{http_code};SIZE:%{size_download};TIME:%{time_total}" \
+    2>"$temp_error_file" || curl_exit_code=$?
     
     return $curl_exit_code
 }
@@ -1320,69 +1535,69 @@ parse_curl_response() {
     # Capture curl metadata
     local curl_info=""
     if [ -f "$temp_error_file" ]; then
-        curl_info=$(tail -1 "$temp_error_file" 2>/dev/null | grep "CURL_STATUS:" || echo "")
-        last_error=$(grep -v "CURL_STATUS:" "$temp_error_file" 2>/dev/null | head -"$ERROR_MESSAGE_LINES" | tr '\n' ' ' || echo "")
+    curl_info=$(tail -1 "$temp_error_file" 2>/dev/null | grep "CURL_STATUS:" || echo "")
+    last_error=$(grep -v "CURL_STATUS:" "$temp_error_file" 2>/dev/null | head -"$ERROR_MESSAGE_LINES" | tr '\n' ' ' || echo "")
     fi
     
     # Parse HTTP status if available
     local http_status=""
     if [[ "$curl_info" =~ CURL_STATUS:([0-9]+) ]]; then
-        http_status="${BASH_REMATCH[1]}"
+    http_status="${BASH_REMATCH[1]}"
     fi
     
     log_with_timestamp "Curl exit code: $curl_exit_code, HTTP status: ${http_status:-unknown}"
     
     # Check for success conditions
     if [ $curl_exit_code -eq 0 ]; then
-        if [ -f "$output_file" ]; then
-            local file_size=$(stat -f%z "$output_file" 2>/dev/null || echo "0")
-            log_with_timestamp "Output file created with size: $file_size bytes"
-            
-            if [ "$file_size" -gt 0 ]; then
-                # File has content - check if it's valid JSON
-                if jq . "$output_file" >/dev/null 2>&1; then
-                    success=true
-                    log_with_timestamp "SUCCESS: Valid JSON content retrieved and saved"
-                else
-                    log_with_timestamp "WARNING: File created but content is not valid JSON"
-                    last_error="Invalid JSON content in response file"
-                fi
+    if [ -f "$output_file" ]; then
+        local file_size=$(get_file_size "$output_file")
+        log_with_timestamp "Output file created with size: $file_size bytes"
+        
+        if [ "$file_size" -gt 0 ]; then
+            # File has content - check if it's valid JSON
+            if jq . "$output_file" >/dev/null 2>&1; then
+                success=true
+                log_with_timestamp "SUCCESS: Valid JSON content retrieved and saved"
             else
-                log_with_timestamp "WARNING: Empty file created (possible Google Drive sync interference)"
-                last_error="Empty response file created"
+                log_with_timestamp "WARNING: File created but content is not valid JSON"
+                last_error="Invalid JSON content in response file"
             fi
         else
-            log_with_timestamp "ERROR: Output file not created despite curl success"
-            last_error="Output file not created"
+            log_with_timestamp "WARNING: Empty file created (possible Google Drive sync interference)"
+            last_error="Empty response file created"
         fi
     else
-        log_with_timestamp "ERROR: Curl failed with exit code $curl_exit_code"
-        if [ -n "$last_error" ]; then
-            log_with_timestamp "ERROR details: $last_error"
-        fi
+        log_with_timestamp "ERROR: Output file not created despite curl success"
+        last_error="Output file not created"
+    fi
+    else
+    log_with_timestamp "ERROR: Curl failed with exit code $curl_exit_code"
+    if [ -n "$last_error" ]; then
+        log_with_timestamp "ERROR details: $last_error"
+    fi
     fi
     
     # Handle HTTP errors
     if [ -n "$http_status" ] && [ "$http_status" -ge 400 ]; then
-        log_with_timestamp "HTTP ERROR: Status $http_status"
-        last_error="HTTP $http_status error"
-        
-        # Don't retry on certain HTTP errors
-        case "$http_status" in
-            401|403|404|429)
-                log_with_timestamp "HTTP $http_status - Not retrying (permanent error)"
-                echo "$last_error"
-                return 2  # Special return code for permanent errors
-                ;;
-        esac
+    log_with_timestamp "HTTP ERROR: Status $http_status"
+    last_error="HTTP $http_status error"
+    
+    # Don't retry on certain HTTP errors
+    case "$http_status" in
+        401|403|404|429)
+            log_with_timestamp "HTTP $http_status - Not retrying (permanent error)"
+            echo "$last_error"
+            return 2  # Special return code for permanent errors
+            ;;
+    esac
     fi
     
     if [ "$success" = true ]; then
-        echo "SUCCESS"
-        return 0
+    echo "SUCCESS"
+    return 0
     else
-        echo "$last_error"
-        return 1
+    echo "$last_error"
+    return 1
     fi
 }
 
@@ -1394,8 +1609,8 @@ handle_retry_logic() {
     
     # If this was the last attempt, give up
     if [ $attempt -eq $max_retries ]; then
-        log_with_timestamp "FINAL FAILURE: All $max_retries attempts exhausted"
-        return 1
+    log_with_timestamp "FINAL FAILURE: All $max_retries attempts exhausted"
+    return 1
     fi
     
     # Wait before retry with exponential backoff
@@ -1405,7 +1620,7 @@ handle_retry_logic() {
     # Exponential backoff with jitter
     delay=$((delay * 2))
     if [ $delay -gt 60 ]; then
-        delay=60  # Cap at 60 seconds
+    delay=60  # Cap at 60 seconds
     fi
     
     # Add random jitter (0-2 seconds) to avoid thundering herd
@@ -1427,12 +1642,12 @@ robust_curl_with_retry() {
     
     # Ensure API key is set
     if [ -z "$api_key" ]; then
-        api_key="$AI_API_KEY"
+    api_key="$AI_API_KEY"
     fi
     
     # Validate parameters using helper function
     if ! validate_curl_parameters "$url" "$output_file" "$max_retries" "$base_delay" "$timeout" "$api_key"; then
-        return 1
+    return 1
     fi
     
     local attempt=0
@@ -1443,38 +1658,38 @@ robust_curl_with_retry() {
     log_with_timestamp "Output file: $output_file (max_retries: $max_retries)"
     
     while [ $attempt -lt $max_retries ]; do
-        attempt=$((attempt + 1))
-        log_with_timestamp "Curl attempt $attempt/$max_retries (delay: ${delay}s)"
-        
-        # Perform curl request using helper function
-        local curl_exit_code=0
-        perform_curl_request "$url" "$output_file" "$timeout" "$api_key" "$temp_error_file" || curl_exit_code=$?
-        
-        # Parse response using helper function  
-        local parse_result
-        parse_result=$(parse_curl_response "$output_file" "$curl_exit_code" "$temp_error_file")
-        local parse_exit_code=$?
-        
-        # Handle different response types
-        if [ $parse_exit_code -eq 0 ]; then
-            # Success
-            rm -f "$temp_error_file"
-            return 0
-        elif [ $parse_exit_code -eq 2 ]; then
-            # Permanent error, don't retry
-            rm -f "$temp_error_file"
-            return 1
-        fi
-        
-        # Handle retry logic using helper function
-        if delay=$(handle_retry_logic "$attempt" "$max_retries" "$delay"); then
-            continue
-        else
-            # Max retries reached
-            log_with_timestamp "Final error: $parse_result"
-            rm -f "$temp_error_file"
-            return 1
-        fi
+    attempt=$((attempt + 1))
+    log_with_timestamp "Curl attempt $attempt/$max_retries (delay: ${delay}s)"
+    
+    # Perform curl request using helper function
+    local curl_exit_code=0
+    perform_curl_request "$url" "$output_file" "$timeout" "$api_key" "$temp_error_file" || curl_exit_code=$?
+    
+    # Parse response using helper function  
+    local parse_result
+    parse_result=$(parse_curl_response "$output_file" "$curl_exit_code" "$temp_error_file")
+    local parse_exit_code=$?
+    
+    # Handle different response types
+    if [ $parse_exit_code -eq 0 ]; then
+        # Success
+        rm -f "$temp_error_file"
+        return 0
+    elif [ $parse_exit_code -eq 2 ]; then
+        # Permanent error, don't retry
+        rm -f "$temp_error_file"
+        return 1
+    fi
+    
+    # Handle retry logic using helper function
+    if delay=$(handle_retry_logic "$attempt" "$max_retries" "$delay"); then
+        continue
+    else
+        # Max retries reached
+        log_with_timestamp "Final error: $parse_result"
+        rm -f "$temp_error_file"
+        return 1
+    fi
     done
     
     rm -f "$temp_error_file"
@@ -1492,80 +1707,76 @@ wait_for_batch_completion() {
     update_state "waiting_for_batch" "batch_name=$batch_name"
     
     while [ $total_wait -lt $BATCH_MAX_WAIT ]; do
-        # IMPORTANT: Use process-specific filename to avoid collisions in parallel processing
-        local status_file=$(generate_temp_filename "batch_status" "json")
+    # IMPORTANT: Use process-specific filename to avoid collisions in parallel processing
+    local status_file=$(generate_temp_filename "batch_status" "json")
+    
+    # Use robust curl with retry (fixes Google Drive sync issues)
+    if robust_curl_with_retry "$GEMINI_BASE_URL/$batch_name" "$status_file" 2 1 "$BATCH_API_TIMEOUT" "${SELECTED_API_KEY:-$AI_API_KEY}"; then
+        # Reset failure counter on success
+        consecutive_failures=0
         
-        # Use robust curl with retry (fixes Google Drive sync issues)
-        if robust_curl_with_retry "$GEMINI_BASE_URL/$batch_name" "$status_file" 2 1 "$BATCH_API_TIMEOUT" "${SELECTED_API_KEY:-$AI_API_KEY}"; then
-            # Reset failure counter on success
-            consecutive_failures=0
-            
-            # Parse state using jq with proper error handling and fallback patterns
-            local state=""
-            
-            # Pattern 1: Check nested metadata.state (current API format)
-            state=$(jq -r '.metadata.state // empty' "$status_file" 2>/dev/null)
-            
-            # Pattern 2: Check flat state (legacy format compatibility)
-            if [ -z "$state" ] || [ "$state" = "null" ]; then
-                state=$(jq -r '.state // empty' "$status_file" 2>/dev/null)
-            fi
-            
-            # Handle parsing errors or null values
-            if [ -z "$state" ] || [ "$state" = "null" ]; then
-                log_with_timestamp "Failed to parse batch state from JSON response, treating as unknown state"
-                state=""
-            fi
-            
-            log_with_timestamp "Batch state: '$state' (waited ${total_wait}s / ${BATCH_MAX_WAIT}s)"
-            
-            case "$state" in
-                "BATCH_STATE_SUCCEEDED")
-                    log_with_timestamp "Batch completed successfully!"
-                    rm -f "$status_file"
-                    return 0
-                    ;;
-                "BATCH_STATE_FAILED")
-                    log_with_timestamp "Batch processing failed. Check Gemini API logs for details."
-                    rm -f "$status_file"
-                    return 1
-                    ;;
-                "BATCH_STATE_CANCELLED")
-                    log_with_timestamp "Batch was cancelled. Processing stopped."
-                    rm -f "$status_file"
-                    return 1
-                    ;;
-                "BATCH_STATE_PENDING")
-                    log_with_timestamp "Batch is pending (queued), continuing to wait..."
-                    ;;
-                "BATCH_STATE_RUNNING")
-                    log_with_timestamp "Batch is running (actively processing), continuing to wait..."
-                    ;;
-                "BATCH_STATE_PROCESSING")
-                    log_with_timestamp "Batch is processing (finalizing results), continuing to wait..."
-                    ;;
-                "")
-                    log_with_timestamp "Unable to determine batch state from API response, continuing to wait..."
-                    ;;
-                *)
-                    log_with_timestamp "Unknown batch state: '$state', continuing to wait..."
-                    ;;
-            esac
-            
-            rm -f "$status_file"
-        else
-            # Handle curl failure with robust error handling
-            consecutive_failures=$((consecutive_failures + 1))
-            log_with_timestamp "Batch status check failed (consecutive failures: $consecutive_failures/$max_consecutive_failures)"
-            
-            if [ $consecutive_failures -ge $max_consecutive_failures ]; then
-                log_with_timestamp "ERROR: Too many consecutive failures checking batch status"
-                return 1
-            fi
+        # Parse state using jq with proper error handling and fallback patterns
+        local state=""
+        
+        # Pattern 1: Check nested metadata.state (current API format)
+        state=$(jq -r '.metadata.state // empty' "$status_file" 2>/dev/null)
+        
+        
+        # Handle parsing errors or null values
+        if [ -z "$state" ] || [ "$state" = "null" ]; then
+            log_with_timestamp "Failed to parse batch state from JSON response, treating as unknown state"
+            state=""
         fi
         
-        sleep $BATCH_POLL_INTERVAL
-        total_wait=$((total_wait + BATCH_POLL_INTERVAL))
+        log_with_timestamp "Batch state: '$state' (waited ${total_wait}s / ${BATCH_MAX_WAIT}s)"
+        
+        case "$state" in
+            "BATCH_STATE_SUCCEEDED")
+                log_with_timestamp "Batch completed successfully!"
+                rm -f "$status_file"
+                return 0
+                ;;
+            "BATCH_STATE_FAILED")
+                log_with_timestamp "Batch processing failed. Check Gemini API logs for details."
+                rm -f "$status_file"
+                return 1
+                ;;
+            "BATCH_STATE_CANCELLED")
+                log_with_timestamp "Batch was cancelled. Processing stopped."
+                rm -f "$status_file"
+                return 1
+                ;;
+            "BATCH_STATE_PENDING")
+                log_with_timestamp "Batch is pending (queued), continuing to wait..."
+                ;;
+            "BATCH_STATE_RUNNING")
+                log_with_timestamp "Batch is running (actively processing), continuing to wait..."
+                ;;
+            "BATCH_STATE_PROCESSING")
+                log_with_timestamp "Batch is processing (finalizing results), continuing to wait..."
+                ;;
+            "")
+                log_with_timestamp "Unable to determine batch state from API response, continuing to wait..."
+                ;;
+            *)
+                log_with_timestamp "Unknown batch state: '$state', continuing to wait..."
+                ;;
+        esac
+        
+        rm -f "$status_file"
+    else
+        # Handle curl failure with robust error handling
+        consecutive_failures=$((consecutive_failures + 1))
+        log_with_timestamp "Batch status check failed (consecutive failures: $consecutive_failures/$max_consecutive_failures)"
+        
+        if [ $consecutive_failures -ge $max_consecutive_failures ]; then
+            log_with_timestamp "ERROR: Too many consecutive failures checking batch status"
+            return 1
+        fi
+    fi
+    
+    sleep $BATCH_POLL_INTERVAL
+    total_wait=$((total_wait + BATCH_POLL_INTERVAL))
     done
     
     log_with_timestamp "ERROR: Batch wait timeout exceeded ($BATCH_MAX_WAIT seconds)"
@@ -1584,31 +1795,31 @@ get_batch_result() {
     local result_file=$(generate_temp_filename "batch_result" "json")
     
     if robust_curl_with_retry "$GEMINI_BASE_URL/$batch_name" "$result_file" "$max_retries" 1 "$BATCH_API_TIMEOUT" "${SELECTED_API_KEY:-$AI_API_KEY}"; then
-        if [ -f "$result_file" ] && [ -s "$result_file" ]; then
-            # Extract text using helper function
-            # Call function without command substitution to preserve exported variables
-            extract_text_from_json "$result_file"
-            local extract_result=$?
-            local raw_text="$EXTRACTED_TEXT"
+    if [ -f "$result_file" ] && [ -s "$result_file" ]; then
+        # Extract text using helper function
+        # Call function without command substitution to preserve exported variables
+        extract_text_from_json "$result_file"
+        local extract_result=$?
+        local raw_text="$EXTRACTED_TEXT"
+        
+        if [ $extract_result -eq 0 ] && [ -n "$raw_text" ] && [ "$raw_text" != "Error:"* ] && [ "$raw_text" != "null" ]; then
+            process_api_response_text "$raw_text" > "$output_file"
             
-            if [ $extract_result -eq 0 ] && [ -n "$raw_text" ] && [ "$raw_text" != "Error:"* ] && [ "$raw_text" != "null" ]; then
-                process_api_response_text "$raw_text" > "$output_file"
-                
-                rm -f "$result_file"
-                log_with_timestamp "Batch result retrieved and processed successfully"
-                return 0
-            else
-                log_with_timestamp "ERROR: No valid text content found in batch result"
-                rm -f "$result_file"
-                return 1
-            fi
+            rm -f "$result_file"
+            log_with_timestamp "Batch result retrieved and processed successfully"
+            return 0
         else
-            log_with_timestamp "ERROR: Batch result file not created or empty"
+            log_with_timestamp "ERROR: No valid text content found in batch result"
+            rm -f "$result_file"
             return 1
         fi
     else
-        log_with_timestamp "ERROR: Failed to retrieve batch result after $max_retries attempts"
+        log_with_timestamp "ERROR: Batch result file not created or empty"
         return 1
+    fi
+    else
+    log_with_timestamp "ERROR: Failed to retrieve batch result after $max_retries attempts"
+    return 1
     fi
 }
 
@@ -1622,58 +1833,59 @@ extract_text_from_json() {
     TOKEN_INFO="0,0,0,0"  # Default: input,output,thoughts,total
     
     if [ ! -f "$result_file" ] || [ ! -s "$result_file" ]; then
-        return 1
+    return 1
     fi
     
     # Check for error responses first
     local error_msg=$(jq -r '.response.inlinedResponses.inlinedResponses[0].error.message // .metadata.output.inlinedResponses.inlinedResponses[0].error.message // empty' "$result_file" 2>/dev/null)
     if [ -n "$error_msg" ] && [ "$error_msg" != "null" ]; then
-        log_with_timestamp "ERROR: Batch processing failed - $error_msg"
-        return 1
+    log_with_timestamp "ERROR: Batch processing failed - $error_msg"
+    return 1
     fi
     
     # Extract token usage metadata
     # Try different patterns for token info location
     local token_patterns=(
-        '.response.inlinedResponses.inlinedResponses[0]?.response?.usageMetadata'
-        '.usageMetadata'
-        '.metadata.output.inlinedResponses.inlinedResponses[0]?.response?.usageMetadata'
+    '.response.inlinedResponses.inlinedResponses[0]?.response?.usageMetadata'
+    '.usageMetadata'
+    '.metadata.output.inlinedResponses.inlinedResponses[0]?.response?.usageMetadata'
     )
     
     for token_pattern in "${token_patterns[@]}"; do
-        local usage_metadata=$(jq -r "$token_pattern // empty" "$result_file" 2>/dev/null)
-        if [ -n "$usage_metadata" ] && [ "$usage_metadata" != "null" ] && [ "$usage_metadata" != "empty" ]; then
-            local prompt_tokens=$(echo "$usage_metadata" | jq -r '.promptTokenCount // 0')
-            local total_tokens=$(echo "$usage_metadata" | jq -r '.totalTokenCount // 0')
-            local thoughts_tokens=$(echo "$usage_metadata" | jq -r '.thoughtsTokenCount // 0')
-            # Use candidatesTokenCount if available, otherwise calculate
-            local candidates_tokens=$(echo "$usage_metadata" | jq -r '.candidatesTokenCount // 0')
-            local output_tokens=$candidates_tokens
-            if [ "$output_tokens" -eq 0 ]; then
-                # Fallback calculation if candidatesTokenCount is not available
-                output_tokens=$((total_tokens - prompt_tokens - thoughts_tokens))
-            fi
-            TOKEN_INFO="$prompt_tokens,$output_tokens,$thoughts_tokens,$total_tokens"
-            log_with_timestamp "Token usage: input=$prompt_tokens, output=$output_tokens, thoughts=$thoughts_tokens, total=$total_tokens"
-            break
+    local usage_metadata=$(jq -r "$token_pattern // empty" "$result_file" 2>/dev/null)
+    if [ -n "$usage_metadata" ] && [ "$usage_metadata" != "null" ] && [ "$usage_metadata" != "empty" ]; then
+        local prompt_tokens=$(echo "$usage_metadata" | jq -r '.promptTokenCount // 0')
+        local total_tokens=$(echo "$usage_metadata" | jq -r '.totalTokenCount // 0')
+        local thoughts_tokens=$(echo "$usage_metadata" | jq -r '.thoughtsTokenCount // 0')
+        # Use candidatesTokenCount if available, otherwise calculate
+        local candidates_tokens=$(echo "$usage_metadata" | jq -r '.candidatesTokenCount // 0')
+        local output_tokens=$candidates_tokens
+        if [ "$output_tokens" -eq 0 ]; then
+            # Fallback calculation if candidatesTokenCount is not available
+            output_tokens=$((total_tokens - prompt_tokens - thoughts_tokens))
         fi
+        TOKEN_INFO="$prompt_tokens,$output_tokens,$thoughts_tokens,$total_tokens"
+        log_with_timestamp "Token usage: input=$prompt_tokens, output=$output_tokens, thoughts=$thoughts_tokens, total=$total_tokens"
+        break
+    fi
     done
     
     # Extract text content
     local patterns=(
-        '.response.inlinedResponses.inlinedResponses[0]?.response?.candidates[0]?.content?.parts[]?.text // empty'
-        '.candidates[0]?.content?.parts[]?.text // empty'
-        '.content?.parts[]?.text // empty'
-        '.parts[]?.text // empty'
-        '.text // empty'
+    '.metadata.output.inlinedResponses.inlinedResponses[0].response.candidates[0].content.parts[0].text // empty'
+    '.response.inlinedResponses.inlinedResponses[0]?.response?.candidates[0]?.content?.parts[]?.text // empty'
+    '.candidates[0]?.content?.parts[]?.text // empty'
+    '.content?.parts[]?.text // empty'
+    '.parts[]?.text // empty'
+    '.text // empty'
     )
     
     for pattern in "${patterns[@]}"; do
-        local raw_text=$(jq -r "$pattern" "$result_file" 2>/dev/null)
-        if [ -n "$raw_text" ] && [ "$raw_text" != "null" ]; then
-            EXTRACTED_TEXT="$raw_text"  # Set global variable instead of echoing
-            return 0
-        fi
+    local raw_text=$(jq -r "$pattern" "$result_file" 2>/dev/null)
+    if [ -n "$raw_text" ] && [ "$raw_text" != "null" ]; then
+        EXTRACTED_TEXT="$raw_text"  # Set global variable instead of echoing
+        return 0
+    fi
     done
     
     return 1
@@ -1684,31 +1896,36 @@ process_api_response_text() {
     local raw_text="$1"
     
     echo "$raw_text" | \
-        sed 's/\\n/\n/g' | \
-        sed 's/\\"/"/g' | \
-        sed 's/\\\\/\\/g' | \
-        sed 's/\\t/\t/g' | \
-        sed 's/\\r/\r/g' | \
-        sed 's/\\u003e/>/g' | \
-        sed 's/\\u003cbr\\u003e//g' | \
-        sed 's/^```markdown[[:space:]]*//g' | \
-        sed 's/[[:space:]]*```[[:space:]]*$//g' | \
-        sed '/^```markdown$/d' | \
-        sed '/^```$/d' | \
-        sed '1{/^[[:space:]]*$/d;}'
+    sed 's/\\n/\n/g' | \
+    sed 's/\\"/"/g' | \
+    sed 's/\\\\/\\/g' | \
+    sed 's/\\t/\t/g' | \
+    sed 's/\\r/\r/g' | \
+    sed 's/\\u003e/>/g' | \
+    sed 's/\\u003cbr\\u003e//g' | \
+    sed 's/^```markdown[[:space:]]*//g' | \
+    sed 's/[[:space:]]*```[[:space:]]*$//g' | \
+    sed '/^```markdown$/d' | \
+    sed '/^```$/d' | \
+    sed '1{/^[[:space:]]*$/d;}'
 }
 
 # Helper function to generate process-specific temporary filenames
 generate_temp_filename() {
     local base_name="$1"
     local extension="${2:-tmp}"
-    echo "${base_name}_${BATCH_ID}.${extension}"
+    echo "${TMP_DIR}/${base_name}_${BATCH_ID}.${extension}"
 }
 
 # Process with Gemini batch mode
 process_with_gemini_batch() {
     local prompt="$1"
     local output_file="$2"
+    
+    # Ensure correct API key for batch processing (PAID API required)
+    if [[ "${PROCESSING_MODE:-}" == "BATCH" ]] || [[ "${FORCE_PAID_API:-false}" == "true" ]]; then
+        SELECTED_API_KEY="$AI_API_KEY_PAID"
+    fi
     
     log_with_timestamp "Starting Gemini batch processing"
     update_state "creating_batch_request" "model=$AI_MODEL"
@@ -1722,27 +1939,37 @@ process_with_gemini_batch() {
     
     log_with_timestamp "Submitting batch request to Gemini API"
     if curl -s -X POST \
-        "$GEMINI_BASE_URL/models/$AI_MODEL:batchGenerateContent" \
-        -H "Content-Type: application/json" \
-        -H "x-goog-api-key: ${SELECTED_API_KEY:-$AI_API_KEY}" \
-        -d "@$request_file" \
-        --connect-timeout "$BATCH_API_TIMEOUT" \
-        --max-time "$BATCH_API_MAX_TIME" \
-        -o "$response_file"; then
-        # Parse batch name using jq with proper error handling
-        local batch_name=$(jq -r '.name // empty' "$response_file" 2>/dev/null)
+    "$GEMINI_BASE_URL/models/$AI_MODEL:batchGenerateContent" \
+    -H "Content-Type: application/json" \
+    -H "x-goog-api-key: ${SELECTED_API_KEY:-$AI_API_KEY}" \
+    -d "@$request_file" \
+    --connect-timeout "$BATCH_API_TIMEOUT" \
+    --max-time "$BATCH_API_MAX_TIME" \
+    -o "$response_file"; then
+    # Parse batch name using jq with proper error handling
+    local batch_name=$(jq -r '.name // empty' "$response_file" 2>/dev/null)
+    
+    if [ -n "$batch_name" ] && [ "$batch_name" != "null" ]; then
+        log_with_timestamp "Batch submitted successfully: $batch_name"
         
-        if [ -n "$batch_name" ] && [ "$batch_name" != "null" ]; then
-            log_with_timestamp "Batch submitted successfully: $batch_name"
-            
-            if wait_for_batch_completion "$batch_name"; then
-                if get_batch_result "$batch_name" "$output_file"; then
-                    log_with_timestamp "Batch processing completed successfully"
-                    update_state "batch_processing_completed" "output_file=$output_file"
-                    return 0
-                fi
+        if wait_for_batch_completion "$batch_name"; then
+            if get_batch_result "$batch_name" "$output_file"; then
+                log_with_timestamp "Batch processing completed successfully"
+                update_state "batch_processing_completed" "output_file=$output_file"
+                return 0
             fi
         fi
+    else
+        log_with_timestamp "ERROR: Failed to parse batch response or empty batch name"
+        if [ -f "$response_file" ]; then
+            log_with_timestamp "API Response: $(cat "$response_file")"
+        fi
+    fi
+    else
+    log_with_timestamp "ERROR: Failed to submit batch request"
+    if [ -f "$response_file" ]; then
+        log_with_timestamp "API Response: $(cat "$response_file")"
+    fi
     fi
     
     handle_api_error "Gemini" "batch processing" "Batch processing failed"
@@ -1756,15 +1983,15 @@ setup_directories() {
     # Get PDF basename for temp directory naming
     local pdf_basename="unknown"
     if [ -n "${PDF_URL:-}" ]; then
-        if [ "${IS_URL:-true}" = false ] && [ -f "$PDF_URL" ]; then
-            pdf_basename="$(basename "$PDF_URL" .pdf)"
-        fi
+    if [ "${IS_URL:-true}" = false ] && [ -f "$PDF_URL" ]; then
+        pdf_basename="$(basename "$PDF_URL" .pdf)"
+    fi
     fi
     
     # Determine temp directory location - always in script/ directory
     local temp_base_dir="${PDF_TEMP_BASE_DIR:-$SCRIPT_DIR}"
     if [[ "$temp_base_dir" == ./* ]] || [[ "$temp_base_dir" == ../* ]]; then
-        temp_base_dir="$(cd "$SCRIPT_DIR" && cd "$temp_base_dir" 2>/dev/null && pwd)" || temp_base_dir="$SCRIPT_DIR/$temp_base_dir"
+    temp_base_dir="$(cd "$SCRIPT_DIR" && cd "$temp_base_dir" 2>/dev/null && pwd)" || temp_base_dir="$SCRIPT_DIR/$temp_base_dir"
     fi
     
     TMP_DIR="$temp_base_dir/temp_${TIMESTAMP}_${pdf_basename}"
@@ -1794,7 +2021,7 @@ initialize_processing() {
 setup_and_validate_environment() {
     # Load environment first to get PDF_PROCESSED_DIR
     if ! load_environment; then
-        handle_validation_error "environment" "Failed to load environment variables"
+    handle_validation_error "environment" "Failed to load environment variables"
     fi
     
     # Setup directories after loading environment
@@ -1816,9 +2043,9 @@ handle_pdf_acquisition() {
     local thread_ts=$(send_slack_start_notification "$PDF_URL" "$BATCH_ID" "${PROCESSING_MODE:-AUTO}")
     
     if [ -n "$thread_ts" ]; then
-        update_state "start_notification_sent" "thread_ts=$thread_ts"
+    update_state "start_notification_sent" "thread_ts=$thread_ts"
     else
-        update_state "start_notification_failed" "fallback_mode=true"
+    update_state "start_notification_failed" "fallback_mode=true"
     fi
     
     # Download PDF
@@ -1830,37 +2057,57 @@ handle_pdf_acquisition() {
 
 # Stage 4: Convert and prepare images
 convert_and_prepare_images() {
-    # Convert PDF to images
+    # Convert PDF to images (this function already changes to TMP_DIR)
     convert_pdf_to_images "$TMP_DIR"
     
-    # Change to temp directory for processing
-    cd "$TMP_DIR"
+    # Note: convert_pdf_to_images already changes to TMP_DIR, no need to cd again
 }
 
 # Stage 5: Process with AI API  
 process_with_ai_api() {
+    log_with_timestamp "🔄 Starting Stage 5: Process with AI API"
     local source_value
     
     # Prepare source value for YAML frontmatter
     if [ "$IS_URL" = true ]; then
-        source_value="$PDF_URL"
+    source_value="$PDF_URL"
     else
-        # For local files, use relative path from vault root
-        local vault_relative_path
-        # Get absolute paths for comparison (macOS compatible)
-        local abs_vault_dir=$(cd "$VAULT_DIR" && pwd)
-        local abs_pdf_path=$(cd "$(dirname "$PDF_URL")" && pwd)/$(basename "$PDF_URL")
+    # For local files, use relative path from vault root
+    local vault_relative_path
+    # Get absolute paths for comparison (macOS compatible)
+    local abs_vault_dir=$(cd "$VAULT_DIR" && pwd)
+    
+    # PDF_URLの絶対パス化 - 現在のディレクトリがTMP_DIRに変更されていることを考慮
+    local abs_pdf_path
+    if [[ "$PDF_URL" = /* ]]; then
+        # 既に絶対パス
+        abs_pdf_path="$PDF_URL"
+    else
+        # 相対パスの場合 - TMP_DIRに移動後の状況を考慮
+        local current_dir=$(pwd)
+        local parent_dir=$(dirname "$current_dir")
         
-        # Create relative path by removing vault directory prefix
-        if [[ "$abs_pdf_path" == "$abs_vault_dir"/* ]]; then
-            vault_relative_path="${abs_pdf_path#$abs_vault_dir/}"
+        # PDF_URLが"dirname/filename"形式の場合の処理
+        if [[ "$PDF_URL" == */* ]]; then
+            # パスにディレクトリが含まれる場合
+            abs_pdf_path="$parent_dir/$PDF_URL"
         else
-            # Fallback to basename if not under vault directory
-            vault_relative_path="$(basename "$PDF_URL")"
+            # ファイル名のみの場合は現在のディレクトリ
+            abs_pdf_path="$current_dir/$PDF_URL"
         fi
-        source_value="$vault_relative_path"
     fi
     
+    # Create relative path by removing vault directory prefix
+    if [[ "$abs_pdf_path" == "$abs_vault_dir"/* ]]; then
+        vault_relative_path="${abs_pdf_path#$abs_vault_dir/}"
+    else
+        # Fallback to basename if not under vault directory
+        vault_relative_path="$(basename "$PDF_URL")"
+    fi
+    source_value="$vault_relative_path"
+    fi
+    
+    log_with_timestamp "✅ Stage 5 completed: source_value=$source_value"
     echo "$source_value"
 }
 
@@ -1868,16 +2115,18 @@ process_with_ai_api() {
 load_tag_dictionary() {
     local tag_file="$VAULT_DIR/script/tag.md"
     if [ -f "$tag_file" ]; then
-        cat "$tag_file"
+    cat "$tag_file"
     else
-        echo "# Tag dictionary not available"
+    echo "# Tag dictionary not available"
     fi
 }
 
 # Generate OCR processing prompt with hybrid tagging
 generate_ocr_prompt() {
+    log_with_timestamp "🔄 Starting generate_ocr_prompt"
     local source_value="$1"
     local tag_dictionary=$(load_tag_dictionary)
+    log_with_timestamp "✅ generate_ocr_prompt completed"
     
     cat << EOF
 これらの画像を以下のステップに従って完全なMarkdown文書を生成してください：
@@ -1946,7 +2195,7 @@ STEP3: 動的タグを2-4個新規作成
 title: 文書内容を踏まえた適切な日本語タイトル
 author: 文書から特定できる著者名、不明な場合は空欄
 abstract: 文書の概要・要約を1-2文で記述
-URL: ${source_value}がURLの場合。ローカルファイルの場合は空欄
+URL: ${source_value}
 created: 現在の日時（日本時間）
 issued: 元の文書の出版日時、不明な場合は空欄 
 container-title:
@@ -1988,28 +2237,38 @@ tags:
 EOF
 }
 
-# Stage 6: Determine API mode based on payload size
+# Stage 6: Determine API mode based on PNG Base64 size
 determine_api_mode_from_images() {
-    log_with_timestamp "Pre-determining API mode based on image payload size"
+    log_with_timestamp "Determining API mode based on PNG Base64 size"
     
-    # Create a temporary JSON parts file to measure payload size
-    local temp_json_parts_file=$(generate_temp_filename "temp_json_parts" "tmp")
-    echo '{"text":"Payload size measurement"}' > "$temp_json_parts_file"
+    # Get the downloaded PDF file path
+    local pdf_file="$TMP_DIR/downloaded.pdf"
     
-    # Encode images to measure payload size
-    encode_images_to_base64_with_size_check "$temp_json_parts_file"
+    if [[ ! -f "$pdf_file" ]]; then
+        log_with_timestamp "⚠️ PDF file not found, using fallback to PAID API"
+        # Set PAID API as fallback
+        local paid_key=$(grep "AI_API_KEY_PAID=" "$VAULT_DIR/.env" 2>/dev/null | sed 's/^AI_API_KEY_PAID=//' | sed 's/ # .*//')
+        if [ -z "$paid_key" ]; then
+            log_with_timestamp "ERROR: AI_API_KEY_PAID is required but not set"
+            handle_validation_error "api_selection" "PAID API key not available"
+            return 1
+        fi
+        export PROCESSING_MODE="BATCH"
+        export SELECTED_API_KEY="$paid_key"
+        export USE_FILE_API="true"
+        return 0
+    fi
+    
+    # Use the new determine function
+    determine_processing_mode_by_pdf "$pdf_file"
     local api_selection_status=$?
-    
-    # Clean up temporary file
-    rm -f "$temp_json_parts_file"
     
     if [ $api_selection_status -eq 0 ]; then
         log_with_timestamp "API mode determined: ${PROCESSING_MODE:-UNKNOWN}"
         return 0
     else
-        log_with_timestamp "Failed to determine API mode - large payload requires Paid API key"
-        handle_validation_error "api_selection" "Large payload requires Paid API key but key not available"
-        return 1
+        log_with_timestamp "API mode determination completed"
+        return 0
     fi
 }
 
@@ -2018,29 +2277,50 @@ execute_ai_processing() {
     local prompt="$1"
     
     case "${PROCESSING_MODE:-REALTIME}" in
-        "REALTIME")
-            log_with_timestamp "Processing in realtime mode"
-            log_with_timestamp "Starting Gemini realtime processing"
-            update_state "processing_with_gemini" "mode=realtime;model=$AI_MODEL"
+    "REALTIME")
+        log_with_timestamp "Processing in realtime mode"
+        log_with_timestamp "Starting Gemini realtime processing"
+        update_state "processing_with_gemini" "mode=realtime;model=$AI_MODEL"
+        
+        local gemini_result=0
+        call_gemini_bash_api "$prompt" > "$TMP_DIR/gemini_output.log" || gemini_result=$?
+        
+        if [ $gemini_result -eq 0 ]; then
+            log_with_timestamp "Gemini API processing completed successfully"
+            update_state "gemini_completed" "output_file=$TMP_DIR/gemini_output.log"
+        elif [ $gemini_result -eq 2 ]; then
+            # RECITATION error - retry with PAID API automatically
+            log_with_timestamp "🔄 Retrying with PAID API due to RECITATION error..."
             
-            if call_gemini_bash_api "$prompt" > "gemini_output.log"; then
-                log_with_timestamp "Gemini API processing completed successfully"
-                update_state "gemini_completed" "output_file=gemini_output.log"
+            # Force PAID API mode temporarily
+            local original_processing_mode="${PROCESSING_MODE}"
+            PROCESSING_MODE="BATCH"
+            
+            if process_with_gemini_batch "$prompt" "$TMP_DIR/gemini_output.log"; then
+                log_with_timestamp "✅ PAID API retry successful"
+                update_state "gemini_completed" "output_file=$TMP_DIR/gemini_output.log;retry=paid_api"
+                # Restore original mode
+                PROCESSING_MODE="${original_processing_mode}"
             else
-                handle_api_error "Gemini" "realtime processing" "API processing failed"
+                log_with_timestamp "❌ PAID API retry also failed"
+                PROCESSING_MODE="${original_processing_mode}"
+                handle_api_error "Gemini" "realtime processing with PAID API fallback" "Both APIs failed"
             fi
-            ;;
-            
-        "BATCH")
-            log_with_timestamp "Processing in batch mode"
-            
-            if process_with_gemini_batch "$prompt" "gemini_output.log"; then
-                log_with_timestamp "Gemini batch processing completed successfully"
-                update_state "gemini_completed" "output_file=gemini_output.log"
-            else
-                handle_api_error "Gemini" "batch processing" "Batch processing failed"
-            fi
-            ;;
+        else
+            handle_api_error "Gemini" "realtime processing" "API processing failed"
+        fi
+        ;;
+        
+    "BATCH")
+        log_with_timestamp "Processing in batch mode"
+        
+        if process_with_gemini_batch "$prompt" "$TMP_DIR/gemini_output.log"; then
+            log_with_timestamp "Gemini batch processing completed successfully"
+            update_state "gemini_completed" "output_file=$TMP_DIR/gemini_output.log"
+        else
+            handle_api_error "Gemini" "batch processing" "Batch processing failed"
+        fi
+        ;;
     esac
 }
 
@@ -2048,11 +2328,12 @@ execute_ai_processing() {
 finalize_and_save_results() {
     local source_value="$1"
     
-    # Post-process Gemini output to ensure YAML frontmatter
-    ensure_yaml_frontmatter "gemini_output.log" "$source_value"
+    # Post-process Gemini output to ensure YAML frontmatter and get title
+    local gemini_file="$TMP_DIR/gemini_output.log"
     
-    # Extract title for file naming
-    local title=$(extract_title_from_content "$(cat gemini_output.log)")
+    local title
+    title=$(ensure_yaml_frontmatter "$gemini_file" "$source_value" 2>/dev/null || echo "")
+    
     
     log_with_timestamp "Processing completed, saving files with title: $title"
     update_state "saving_files" "title=$title"
@@ -2100,6 +2381,9 @@ process_batch() {
     local scan_dir="$1"
     local category="$2"
     
+    # Initialize batch start time
+    START_TIME=$(date +%s)
+    
     log_with_timestamp "Starting batch processing in directory: $scan_dir"
     
     # Load environment to get MAX_PARALLEL_JOBS
@@ -2110,55 +2394,61 @@ process_batch() {
     local pdf_files=()
     
     if [ -d "$unprocessed_dir" ]; then
-        log_with_timestamp "Processing files from unprocessed directory: $unprocessed_dir"
-        # Build array of PDF files to avoid xargs command line length issues
-        while IFS= read -r -d '' pdf_file; do
-            pdf_files+=("$pdf_file")
-        done < <(find "$unprocessed_dir" -name "*.pdf" -type f -print0)
+    log_with_timestamp "Processing files from unprocessed directory: $unprocessed_dir"
+    # Build array of PDF files to avoid xargs command line length issues
+    while IFS= read -r -d '' pdf_file; do
+        pdf_files+=("$pdf_file")
+    done < <(find "$unprocessed_dir" -name "*.pdf" -type f -print0)
     else
-        log_with_timestamp "No unprocessed directory found, processing all PDFs in: $scan_dir"
-        # Build array for main directory processing
-        while IFS= read -r -d '' pdf_file; do
-            pdf_files+=("$pdf_file")
-        done < <(find "$scan_dir" -name "*.pdf" -type f -print0)
+    log_with_timestamp "No unprocessed directory found, processing all PDFs in: $scan_dir"
+    # Build array for main directory processing
+    while IFS= read -r -d '' pdf_file; do
+        pdf_files+=("$pdf_file")
+    done < <(find "$scan_dir" -name "*.pdf" -type f -print0)
     fi
     
     # Process files with proper parallel job control
     if [ ${#pdf_files[@]} -gt 0 ]; then
-        log_with_timestamp "Found ${#pdf_files[@]} PDF files to process"
+    log_with_timestamp "Found ${#pdf_files[@]} PDF files to process"
+    
+    for pdf_file in "${pdf_files[@]}"; do
+        log_with_timestamp "Starting processing for: $pdf_file"
+        # Execute in background to maintain parallel processing
+        "$0" "$pdf_file" "$category" &
         
-        for pdf_file in "${pdf_files[@]}"; do
-            log_with_timestamp "Starting processing for: $pdf_file"
-            # Execute in background to maintain parallel processing
-            "$0" "$pdf_file" "$category" &
-            
-            # Simple job control to limit concurrent processes
-            while [ "$(jobs -r | wc -l)" -ge "${MAX_PARALLEL_JOBS:-5}" ]; do
-                sleep 1
-            done
+        # Simple job control to limit concurrent processes
+        while [ "$(jobs -r | wc -l)" -ge "${MAX_PARALLEL_JOBS:-5}" ]; do
+            sleep 1
         done
-        
-        # Wait for all background jobs to complete
-        log_with_timestamp "Waiting for all background processes to complete..."
-        wait
+    done
+    
+    # Wait for all background jobs to complete
+    log_with_timestamp "Waiting for all background processes to complete..."
+    wait
     else
-        log_with_timestamp "No PDF files found to process"
+    log_with_timestamp "No PDF files found to process"
     fi
     
     log_with_timestamp "Batch processing completed"
+    
+    # Send batch completion notification to Slack
+    local processed_count=${#pdf_files[@]}
+    local batch_summary="Processed $processed_count PDF files from $(basename "$scan_dir")"
+    local processing_duration=$(calculate_processing_duration "$START_TIME")
+    send_slack_notification "success" "$scan_dir" "Batch Processing Complete" "$batch_summary" "" "" "$processing_duration" "0,0,0,0"
 }
 
 # Main execution function
 main() {
     # Parse arguments first to determine processing mode
     if ! parse_arguments "$@"; then
-        exit 1
+    exit 1
     fi
     
     # Check if running in batch mode
     if [[ "${BATCH_MODE:-false}" == "true" ]]; then
-        process_batch "$SCAN_DIR" "$PRIMARY_TAG"
-        return 0
+    process_batch "$SCAN_DIR" "$PRIMARY_TAG"
+    return 0
     fi
     
     # Single file processing (original pipeline)
@@ -2181,13 +2471,22 @@ main() {
     
     # Stage 5: Process with AI API (prepare source value and generate prompt)
     local source_value=$(process_with_ai_api)
-    local prompt=$(generate_ocr_prompt "$source_value")
+    
+    # Generate prompt to temporary file to avoid shell variable limitation
+    local prompt_file=$(generate_temp_filename "prompt" "txt")
+    
+    # Generate prompt using the dedicated function
+    generate_ocr_prompt "$source_value" > "$prompt_file"
     
     # Stage 6: Determine API mode based on payload size
+    log_with_timestamp "🔄 Starting Stage 6: Determine API mode"
     determine_api_mode_from_images
+    log_with_timestamp "✅ Stage 6 completed: API mode determined"
     
     # Stage 7: Execute AI processing based on mode
-    execute_ai_processing "$prompt"
+    log_with_timestamp "🔄 Starting Stage 7: Execute AI processing"
+    execute_ai_processing "$(cat "$prompt_file")"
+    log_with_timestamp "✅ Stage 7 completed: AI processing done"
     
     # Stage 7: Finalize and save results
     local result_info=$(finalize_and_save_results "$source_value")
@@ -2198,6 +2497,112 @@ main() {
     # Stage 8: Send completion notifications
     send_completion_notifications "$thread_ts" "$title" "$markdown_file" "$pdf_target"
 }
+
+# File API Implementation Functions
+
+
+# Upload file to File API and return file URI
+upload_file_to_file_api() {
+    local file_path="$1"
+    local mime_type="${2:-application/octet-stream}"
+    
+    if [ ! -f "$file_path" ]; then
+    log_with_timestamp "ERROR: File not found: $file_path"
+    return 1
+    fi
+    
+    # Get appropriate API key based on current processing mode
+    local api_key
+    if [ "${PROCESSING_MODE:-}" = "REALTIME" ]; then
+    api_key=$(grep "AI_API_KEY_FREE=" "$VAULT_DIR/.env" 2>/dev/null | sed 's/^AI_API_KEY_FREE=//' | sed 's/ # .*//')
+    else
+    api_key=$(grep "AI_API_KEY_PAID=" "$VAULT_DIR/.env" 2>/dev/null | sed 's/^AI_API_KEY_PAID=//' | sed 's/ # .*//')
+    # Fallback to free if paid not available
+    if [ -z "$api_key" ]; then
+        api_key=$(grep "AI_API_KEY_FREE=" "$VAULT_DIR/.env" 2>/dev/null | sed 's/^AI_API_KEY_FREE=//' | sed 's/ # .*//')
+    fi
+    fi
+    
+    if [ -z "$api_key" ]; then
+    log_with_timestamp "ERROR: No API key available for File API"
+    return 1
+    fi
+    
+    log_with_timestamp "Uploading file to File API: $(basename "$file_path")"
+    log_with_timestamp "File size: $(stat -f%z "$file_path" 2>/dev/null || stat -c%s "$file_path" 2>/dev/null) bytes"
+    
+    local response_file=$(generate_temp_filename "file_upload" "json")
+    local curl_log_file=$(generate_temp_filename "curl_debug" "log")
+    
+    local start_time=$(date +%s.%N)
+    local curl_exit_code=0
+    
+    if curl -v --max-time 30 -s -X POST \
+    "https://generativelanguage.googleapis.com/upload/v1beta/files?key=$api_key" \
+    -H "Content-Type: $mime_type" \
+    --data-binary "@$file_path" \
+    -o "$response_file" 2>"$curl_log_file"; then
+        curl_exit_code=0
+    else
+        curl_exit_code=$?
+    fi
+    
+    local end_time=$(date +%s.%N)
+    local duration=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "unknown")
+    
+    if [ $curl_exit_code -eq 0 ]; then
+        log_with_timestamp "File upload successful (${duration}s)"
+        
+        # Extract file URI from response (Gemini File API returns 'uri' field for generateContent)
+        local file_uri=$(grep -o '"uri": "[^"]*"' "$response_file" | sed 's/"uri": "//' | sed 's/"//')
+        
+        if [ -n "$file_uri" ]; then
+            log_with_timestamp "File uploaded successfully: $file_uri"
+            echo "$file_uri"
+            rm -f "$response_file" "$curl_log_file"
+            return 0
+        else
+            log_with_timestamp "ERROR: Failed to extract file URI from response (${duration}s)"
+            log_with_timestamp "Response content: $(cat "$response_file" 2>/dev/null | head -5)"
+            log_with_timestamp "Curl debug: $(cat "$curl_log_file" 2>/dev/null | tail -10)"
+            rm -f "$response_file" "$curl_log_file"
+            return 1
+        fi
+    else
+        log_with_timestamp "ERROR: File API upload failed (exit: $curl_exit_code, ${duration}s)"
+        if [ -f "$response_file" ]; then
+            log_with_timestamp "Error response: $(cat "$response_file" 2>/dev/null | head -5)"
+        fi
+        if [ -f "$curl_log_file" ]; then
+            log_with_timestamp "Curl debug log: $(cat "$curl_log_file" 2>/dev/null | tail -10)"
+        fi
+        rm -f "$response_file" "$curl_log_file"
+        return 1
+    fi
+}
+
+# Generate JSON payload for File API
+generate_file_api_payload() {
+    local file_uri="$1" 
+    local mime_type="$2"
+    local prompt="$3"
+    
+    echo "{
+    \"contents\": [{
+        \"parts\": [
+            {\"text\": \"$prompt\"},
+            {
+                \"fileData\": {
+                    \"mimeType\": \"$mime_type\",
+                    \"fileUri\": \"$file_uri\"
+                }
+            }
+        ]
+    }],
+    \"generationConfig\": {\"temperature\": ${TEMPERATURE:-0.1}}
+    }"
+}
+
 
 
 # Only run main if script is executed directly (not sourced)
